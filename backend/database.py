@@ -204,6 +204,14 @@ class Database:
         await self.db.commit()
         return fact_id
 
+    @staticmethod
+    def _clean_fact_row(row) -> Optional[dict]:
+        if not row:
+            return None
+        d = dict(row)
+        d.pop("embedding", None)
+        return d
+
     async def get_facts(
         self, source_doc_id: Optional[str] = None, limit: int = 500
     ) -> list[dict]:
@@ -218,14 +226,14 @@ class Database:
                 "SELECT * FROM facts ORDER BY created_at DESC LIMIT ?", (limit,)
             )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [self._clean_fact_row(row) for row in rows]
 
     async def get_fact(self, fact_id: str) -> Optional[dict]:
         cursor = await self.db.execute(
             "SELECT * FROM facts WHERE id = ?", (fact_id,)
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        return self._clean_fact_row(row)
 
     async def get_facts_by_fingerprint_prefix(
         self, subject_normalized: str, attribute_normalized: str
@@ -237,7 +245,7 @@ class Database:
             (subject_normalized, attribute_normalized),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [self._clean_fact_row(row) for row in rows]
 
     async def get_all_fact_embeddings(
         self, exclude_doc_id: Optional[str] = None
