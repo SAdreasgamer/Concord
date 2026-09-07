@@ -267,6 +267,111 @@ async def process_and_store_facts(
     return saved_facts
 
 
+async def extract_facts_from_batch(
+    chunks: list[PageChunk],
+    api_key: str,
+    model: Optional[str] = None,
+) -> list[ExtractedFact]:
+    """
+    Extract facts from MULTIPLE pages in a SINGLE LLM call.
+
+    Batches 4-6 pages into one prompt with clear page delimiters.
+    This is the key cost optimization: 27 pages → ~5 API calls instead of 27.
+    """
+    if not chunks:
+        return []
+
+    # If only one chunk, fall back to single extraction
+    if len(chunks) == 1:
+        return await extract_facts_from_chunk(chunks[0], api_key, model)
+
+    target_model = model or DEFAULT_LLM_MODEL
+
+    # Build multi-page prompt with clear delimiters
+    page_sections = []
+    for chunk in chunks:
+        page_sections.append(
+            f"--- PAGE {chunk.page_number} (from: {chunk.doc_name}) ---\n"
+            f"{chunk.text}\n"
+            f"--- END PAGE {chunk.page_number} ---"
+        )
+
+    combined_text = "\n\n".join(page_sections)
+    page_range = f"{chunks[0].page_number}-{chunks[-1].page_number}"
+
+    user_prompt = (
+        f"Document: {chunks[0].doc_name}\n"
+        f"Pages: {page_range} ({len(chunks)} pages)\n\n"
+        f"{combined_text}\n\n"
+        f"Extract all atomic, verifiable facts from ALL {len(chunks)} pages above. "
+        f"Ensure every fact includes the correct page number and an exact verbatim "
+        f"evidence_quote from that specific page's text."
+    )
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = await litellm.acompletion(
+                model=target_model,
+                messages=[
+                    {"role": "system", "content": FACT_EXTRACTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                api_key=api_key,
+                temperature=0.1,
+                max_tokens=8000,  # More tokens for multi-page response
+                response_format={"type": "json_object"},
+            )
+            raw_text = response.choices[0].message.content or ""
+
+            # Track token usage for telemetry
+            input_tokens = getattr(response.usage, "prompt_tokens", 0) if response.usage else 0
+            output_tokens = getattr(response.usage, "completion_tokens", 0) if response.usage else 0
+
+            facts = parse_llm_facts(raw_text, default_page=chunks[0].page_number)
+
+            logger.info(
+                "Batch extraction: %d facts from pages %s (%d input tokens, %d output tokens)",
+                len(facts),
+                page_range,
+                input_tokens,
+                output_tokens,
+            )
+            return facts
+
+        except Exception as e:
+            err_msg = str(e).lower()
+            is_rate_limit = (
+                isinstance(e, litellm.RateLimitError)
+                or "429" in err_msg
+                or "quota" in err_msg
+                or "resource_exhausted" in err_msg
+            )
+            if is_rate_limit and attempt < max_retries - 1:
+                delay = 5.0 * (attempt + 1)
+                logger.warning(
+                    "Rate limit on batch pages %s (attempt %d/%d). Backing off %.1fs...",
+                    page_range,
+                    attempt + 1,
+                    max_retries,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error("Batch extraction failed for pages %s: %s", page_range, e)
+                # Fallback: try individual pages
+                logger.info("Falling back to individual page extraction for pages %s", page_range)
+                all_facts = []
+                for chunk in chunks:
+                    try:
+                        facts = await extract_facts_from_chunk(chunk, api_key, model)
+                        all_facts.extend(facts)
+                        await asyncio.sleep(1.0)
+                    except Exception as inner_e:
+                        logger.warning("Skipping page %d: %s", chunk.page_number, inner_e)
+                return all_facts
+
+
 async def extract_document_facts(
     chunks: list[PageChunk],
     doc_id: str,
@@ -276,42 +381,128 @@ async def extract_document_facts(
     api_key: str,
     model: Optional[str] = None,
     max_pages: Optional[int] = None,
+    telemetry: Optional["PipelineTelemetry"] = None,
 ) -> list[Fact]:
     """
-    Extract facts from all chunks of a document and persist them.
+    HYBRID extraction pipeline — the core architectural differentiator.
 
-    Handles page-by-page extraction with resilience against single-page errors.
+    Instead of blindly sending every page to the LLM like ChatGPT would,
+    Concord uses a 3-stage approach:
+
+    1. CLASSIFY: Heuristic page classifier skips junk pages (TOC, covers,
+       disclaimers) without touching the LLM.
+    2. LOCAL EXTRACT: Pages with structured tables get facts extracted
+       locally using PyMuPDF's table parser — zero API calls.
+    3. BATCH LLM: Remaining pages are batched into groups of 6 for
+       a single LLM call — 5x fewer API calls.
+
+    Result: A 27-page PDF that would cost 27 API calls now costs ~4-5.
     """
+    from backend.page_classifier import classify_page, PageType
+    from backend.table_extractor import extract_facts_from_table
+    from backend.telemetry import PipelineTelemetry
+
+    if telemetry is None:
+        telemetry = PipelineTelemetry()
+
     all_extracted: list[ExtractedFact] = []
     chunks_to_process = chunks[:max_pages] if max_pages else chunks
+    telemetry.total_pages = len(chunks_to_process)
 
-    for idx, chunk in enumerate(chunks_to_process):
+    # --- Stage 1: CLASSIFY pages ---
+    stage_classify = telemetry.start_stage("page_classification")
+    pages_for_llm: list[PageChunk] = []
+
+    for chunk in chunks_to_process:
+        classification = classify_page(
+            text=chunk.text,
+            page_number=chunk.page_number,
+            has_tables=bool(chunk.tables),
+            table_row_count=chunk.table_row_count,
+        )
+
+        if not classification.should_send_to_llm:
+            telemetry.record_page_skip(classification.page_type.value)
+            logger.debug(
+                "Skipping page %d: %s (%s)",
+                chunk.page_number,
+                classification.page_type.value,
+                classification.reason,
+            )
+            continue
+
+        # --- Stage 2: LOCAL TABLE EXTRACTION (no LLM) ---
+        if classification.should_extract_tables_locally and chunk.tables:
+            for table_data in chunk.tables:
+                local_facts = extract_facts_from_table(
+                    table_data=table_data,
+                    doc_name=doc_name,
+                    page_number=chunk.page_number,
+                )
+                if local_facts:
+                    all_extracted.extend(local_facts)
+                    telemetry.facts_from_local_tables += len(local_facts)
+
+        # Still send to LLM for narrative content on the same page
+        pages_for_llm.append(chunk)
+
+    stage_classify.stop()
+    telemetry.pages_sent_to_llm = len(pages_for_llm)
+
+    logger.info(
+        "Page classification: %d/%d pages going to LLM, %d skipped, %d local table facts",
+        len(pages_for_llm),
+        len(chunks_to_process),
+        telemetry.pages_skipped,
+        telemetry.facts_from_local_tables,
+    )
+
+    # --- Stage 3: BATCH LLM EXTRACTION ---
+    stage_extract = telemetry.start_stage("llm_extraction")
+    BATCH_SIZE = 6  # Pages per LLM call
+
+    for batch_start in range(0, len(pages_for_llm), BATCH_SIZE):
+        batch = pages_for_llm[batch_start : batch_start + BATCH_SIZE]
+
         try:
-            facts = await extract_facts_from_chunk(
-                chunk=chunk,
+            batch_facts = await extract_facts_from_batch(
+                chunks=batch,
                 api_key=api_key,
                 model=model,
             )
-            all_extracted.extend(facts)
+            all_extracted.extend(batch_facts)
+            telemetry.facts_from_llm += len(batch_facts)
+            telemetry.record_llm_call()  # Token counts tracked inside
         except Exception as e:
             logger.warning(
-                "Skipping extraction for page %d of '%s' due to error: %s",
-                chunk.page_number,
-                doc_name,
+                "Skipping batch pages %d-%d: %s",
+                batch[0].page_number,
+                batch[-1].page_number,
                 e,
             )
             continue
-        # Polite spacing between pages to stay comfortably within rate limits
-        if idx < len(chunks_to_process) - 1:
+
+        # Polite pacing between batches
+        if batch_start + BATCH_SIZE < len(pages_for_llm):
             await asyncio.sleep(1.0)
+
+    stage_extract.stop()
 
     if not all_extracted:
         return []
 
-    return await process_and_store_facts(
+    # --- Stage 4: NORMALIZE & PERSIST ---
+    stage_persist = telemetry.start_stage("normalization_and_storage")
+    result = await process_and_store_facts(
         extracted_facts=all_extracted,
         doc_id=doc_id,
         doc_name=doc_name,
         db=db,
         registry=registry,
     )
+    stage_persist.stop()
+
+    telemetry.compute_cost_estimate(model or DEFAULT_LLM_MODEL)
+    telemetry.log_summary()
+
+    return result

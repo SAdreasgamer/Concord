@@ -2,6 +2,7 @@
 PDF parsing module.
 
 Extracts text from PDFs page-by-page using PyMuPDF, preserving page numbers.
+Also detects and extracts structured tables for local (non-LLM) fact extraction.
 No hardcoded logic — works with any PDF regardless of content or structure.
 """
 
@@ -10,7 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Optional
 
 import pymupdf  # PyMuPDF
 
@@ -61,22 +62,40 @@ def parse_pdf(
             )
             continue
 
+        # Detect structured tables on this page
+        table_data: list[list[list[Optional[str]]]] = []
+        table_row_count = 0
+        try:
+            tabs = page.find_tables()
+            if tabs.tables:
+                for tab in tabs.tables:
+                    rows = tab.extract()
+                    if rows:
+                        table_data.append(rows)
+                        table_row_count += len(rows)
+        except Exception as e:
+            logger.debug("Table detection failed on page %d: %s", page_num + 1, e)
+
         # Use 1-based page numbering (as displayed in PDF viewers)
         chunk = PageChunk(
             doc_id=doc_id,
             doc_name=doc_name,
             page_number=page_num + 1,
             text=text,
+            tables=table_data if table_data else None,
+            table_row_count=table_row_count,
         )
         chunks.append(chunk)
 
     doc.close()
 
+    tables_found = sum(1 for c in chunks if c.tables)
     logger.info(
-        "Extracted text from %d/%d pages of '%s'",
+        "Extracted text from %d/%d pages of '%s' (%d pages with tables)",
         len(chunks),
         total_pages,
         doc_name,
+        tables_found,
     )
 
     return chunks

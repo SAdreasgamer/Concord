@@ -396,6 +396,7 @@ async def load_sample_dataset(
 ):
     """
     Load and process a bundled starter dataset with a single click.
+    Uses the hybrid extraction pipeline with telemetry.
     """
     import os
     import uuid
@@ -403,6 +404,7 @@ async def load_sample_dataset(
     from backend.config import PROJECT_ROOT, UPLOAD_DIR
     from backend.fact_extractor import extract_document_facts
     from backend.pdf_parser import get_page_count, parse_pdf
+    from backend.telemetry import PipelineTelemetry
 
     sample = SAMPLE_DATASETS.get(dataset_key)
     if not sample:
@@ -432,6 +434,8 @@ async def load_sample_dataset(
     effective_key = get_effective_key(x_api_key)
     facts_extracted = []
     relationships_found = []
+    telemetry = PipelineTelemetry()
+    telemetry.start()
 
     if effective_key:
         try:
@@ -444,9 +448,12 @@ async def load_sample_dataset(
                 api_key=effective_key,
                 model=model,
                 max_pages=max_pages,
+                telemetry=telemetry,
             )
             if facts_extracted:
+                stage_match = telemetry.start_stage("matching_and_judging")
                 candidates = await matcher.find_candidates(new_facts=facts_extracted)
+                telemetry.candidate_pairs_found = len(candidates)
                 if candidates:
                     from backend.relation_judge import judge_and_store_candidates
 
@@ -456,7 +463,11 @@ async def load_sample_dataset(
                         api_key=effective_key,
                         model=model,
                     )
+                    telemetry.relationships_discovered = len(relationships_found)
+                    telemetry.judge_api_calls = len(candidates)
+                stage_match.stop()
         except Exception as e:
+            telemetry.stop()
             return {
                 "doc_id": doc_id,
                 "doc_name": doc_name,
@@ -466,7 +477,10 @@ async def load_sample_dataset(
                 "relationship_count": 0,
                 "status": "extraction_error",
                 "message": f"Sample document parsed, but processing encountered: {str(e)}",
+                "telemetry": telemetry.to_dict(),
             }
+
+    telemetry.stop()
 
     return {
         "doc_id": doc_id,
@@ -483,6 +497,7 @@ async def load_sample_dataset(
         ),
         "facts_preview": [f.model_dump() for f in facts_extracted[:15]],
         "relationships_preview": [r.model_dump() for r in relationships_found[:10]],
+        "telemetry": telemetry.to_dict(),
     }
 
 
@@ -499,9 +514,11 @@ async def upload_pdf(
     """
     Upload a PDF file for processing.
 
-    Parses the PDF into page-level text chunks, saves the document, and
-    if an API key is provided (or configured in env), runs LLM fact extraction
-    and canonical normalization.
+    Uses the HYBRID extraction pipeline:
+    1. Parse PDF → page text + table detection
+    2. Classify pages → skip junk, route tables locally
+    3. Batch remaining pages to LLM → fewer API calls
+    4. Normalize → match → judge relationships
     """
     import os
     import uuid
@@ -509,6 +526,7 @@ async def upload_pdf(
     from backend.config import UPLOAD_DIR
     from backend.fact_extractor import extract_document_facts
     from backend.pdf_parser import get_page_count, parse_pdf
+    from backend.telemetry import PipelineTelemetry
 
     # Validate file type
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -525,7 +543,7 @@ async def upload_pdf(
     doc_id = str(uuid.uuid4())
     doc_name = file.filename
 
-    # Parse PDF into page chunks
+    # Parse PDF into page chunks (now includes table detection)
     try:
         chunks = parse_pdf(file_bytes, doc_name=doc_name, doc_id=doc_id)
     except ValueError as e:
@@ -549,9 +567,12 @@ async def upload_pdf(
     effective_key = get_effective_key(x_api_key)
     facts_extracted = []
     relationships_found = []
+    telemetry = PipelineTelemetry()
+    telemetry.start()
 
     if effective_key:
         try:
+            # Stage: Hybrid extraction (classify → local tables → batch LLM)
             facts_extracted = await extract_document_facts(
                 chunks=chunks,
                 doc_id=doc_id,
@@ -561,10 +582,13 @@ async def upload_pdf(
                 api_key=effective_key,
                 model=model,
                 max_pages=max_pages,
+                telemetry=telemetry,
             )
-            # Run candidate matching and relation judging across documents
+            # Stage: Candidate matching and relation judging
             if facts_extracted:
+                stage_match = telemetry.start_stage("matching_and_judging")
                 candidates = await matcher.find_candidates(new_facts=facts_extracted)
+                telemetry.candidate_pairs_found = len(candidates)
                 if candidates:
                     from backend.relation_judge import judge_and_store_candidates
 
@@ -574,7 +598,11 @@ async def upload_pdf(
                         api_key=effective_key,
                         model=model,
                     )
+                    telemetry.relationships_discovered = len(relationships_found)
+                    telemetry.judge_api_calls = len(candidates)  # Approximate
+                stage_match.stop()
         except Exception as e:
+            telemetry.stop()
             # Document is still saved even if LLM processing hits an error
             return {
                 "doc_id": doc_id,
@@ -585,7 +613,10 @@ async def upload_pdf(
                 "relationship_count": 0,
                 "status": "extraction_error",
                 "message": f"Document parsed but processing failed: {str(e)}",
+                "telemetry": telemetry.to_dict(),
             }
+
+    telemetry.stop()
 
     return {
         "doc_id": doc_id,
@@ -602,6 +633,7 @@ async def upload_pdf(
         ),
         "facts_preview": [f.model_dump() for f in facts_extracted[:15]],
         "relationships_preview": [r.model_dump() for r in relationships_found[:10]],
+        "telemetry": telemetry.to_dict(),
     }
 
 
@@ -614,6 +646,7 @@ async def process_document(
 ):
     """
     Extract facts and judge relationships from an existing document using an API key.
+    Uses the hybrid extraction pipeline with telemetry.
     """
     import os
 
@@ -621,6 +654,7 @@ async def process_document(
     from backend.fact_extractor import extract_document_facts
     from backend.pdf_parser import parse_pdf
     from backend.relation_judge import judge_and_store_candidates
+    from backend.telemetry import PipelineTelemetry
 
     doc = await db.get_document(doc_id)
     if not doc:
@@ -637,6 +671,9 @@ async def process_document(
             detail="API key required. Provide via X-API-Key header or set GEMINI_API_KEY.",
         )
 
+    telemetry = PipelineTelemetry()
+    telemetry.start()
+
     file_bytes = file_path.read_bytes()
     chunks = parse_pdf(file_bytes, doc_name=doc["doc_name"], doc_id=doc_id)
 
@@ -649,11 +686,14 @@ async def process_document(
         api_key=effective_key,
         model=model,
         max_pages=max_pages,
+        telemetry=telemetry,
     )
 
     relationships = []
     if facts:
+        stage_match = telemetry.start_stage("matching_and_judging")
         candidates = await matcher.find_candidates(new_facts=facts)
+        telemetry.candidate_pairs_found = len(candidates)
         if candidates:
             relationships = await judge_and_store_candidates(
                 candidates=candidates,
@@ -661,6 +701,11 @@ async def process_document(
                 api_key=effective_key,
                 model=model,
             )
+            telemetry.relationships_discovered = len(relationships)
+            telemetry.judge_api_calls = len(candidates)
+        stage_match.stop()
+
+    telemetry.stop()
 
     return {
         "doc_id": doc_id,
@@ -669,6 +714,7 @@ async def process_document(
         "relationship_count": len(relationships),
         "facts": [f.model_dump() for f in facts],
         "relationships": [r.model_dump() for r in relationships],
+        "telemetry": telemetry.to_dict(),
     }
 
 

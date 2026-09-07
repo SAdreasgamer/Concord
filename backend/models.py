@@ -55,12 +55,14 @@ class KeyType(str, Enum):
 
 
 class PageChunk(BaseModel):
-    """A single page of text extracted from a PDF."""
+    """A single page of text extracted from a PDF, with optional table data."""
 
     doc_id: str
     doc_name: str
     page_number: int
     text: str
+    tables: Optional[list[list[list[Optional[str]]]]] = None  # PyMuPDF table data
+    table_row_count: int = 0
 
 
 # --- Fact ---
