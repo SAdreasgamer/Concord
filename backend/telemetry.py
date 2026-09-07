@@ -210,3 +210,96 @@ class PipelineTelemetry:
             self.estimated_cost_usd,
             self.total_duration_seconds,
         )
+
+
+class TelemetryTracker:
+    """
+    In-memory registry of telemetry across multiple document ingestion runs.
+    Provides cumulative efficiency metrics and comparative savings over naive baseline.
+    """
+
+    def __init__(self) -> None:
+        self.runs: list[dict] = []
+        self.cumulative_pages: int = 0
+        self.cumulative_skipped_pages: int = 0
+        self.cumulative_api_calls: int = 0
+        self.cumulative_local_facts: int = 0
+        self.cumulative_llm_facts: int = 0
+        self.cumulative_cost_usd: float = 0.0
+
+    def record_run(self, doc_id: str, doc_name: str, telemetry: PipelineTelemetry) -> dict:
+        """Record a completed document run."""
+        data = telemetry.to_dict()
+        data["doc_id"] = doc_id
+        data["doc_name"] = doc_name
+        data["timestamp"] = time.time()
+        
+        self.runs.append(data)
+        self.cumulative_pages += telemetry.total_pages
+        self.cumulative_skipped_pages += telemetry.pages_skipped
+        self.cumulative_api_calls += telemetry.total_api_calls
+        self.cumulative_local_facts += telemetry.facts_from_local_tables
+        self.cumulative_llm_facts += telemetry.facts_from_llm
+        self.cumulative_cost_usd += telemetry.estimated_cost_usd
+
+        return data
+
+    def get_summary(self) -> dict:
+        """Return cumulative metrics and comparison against a naive pipeline."""
+        total_facts = self.cumulative_local_facts + self.cumulative_llm_facts
+        local_ratio = round((self.cumulative_local_facts / total_facts * 100), 1) if total_facts else 0.0
+        pages_saved_pct = round((self.cumulative_skipped_pages / self.cumulative_pages * 100), 1) if self.cumulative_pages else 0.0
+
+        # Naive baseline: 1 extraction API call per page
+        naive_extraction_calls = self.cumulative_pages
+        actual_extraction_calls = sum(r.get("api_usage", {}).get("extraction_api_calls", 0) for r in self.runs)
+        saved_calls = max(0, naive_extraction_calls - actual_extraction_calls)
+        savings_factor = round(naive_extraction_calls / max(actual_extraction_calls, 1), 1) if actual_extraction_calls else 1.0
+
+        # Cost baseline: naive would cost ~7x more tokens
+        naive_cost_usd = round(self.cumulative_cost_usd * max(savings_factor, 1.0), 5)
+        cost_saved_usd = round(max(0.0, naive_cost_usd - self.cumulative_cost_usd), 5)
+
+        return {
+            "total_runs": len(self.runs),
+            "cumulative_pages": self.cumulative_pages,
+            "cumulative_skipped_pages": self.cumulative_skipped_pages,
+            "pages_saved_pct": pages_saved_pct,
+            "cumulative_api_calls": self.cumulative_api_calls,
+            "cumulative_local_facts": self.cumulative_local_facts,
+            "cumulative_llm_facts": self.cumulative_llm_facts,
+            "total_facts": total_facts,
+            "local_extraction_ratio_pct": local_ratio,
+            "cumulative_cost_usd": round(self.cumulative_cost_usd, 5),
+            "naive_baseline": {
+                "naive_extraction_calls": naive_extraction_calls,
+                "actual_extraction_calls": actual_extraction_calls,
+                "calls_saved": saved_calls,
+                "reduction_factor": f"{savings_factor}x",
+                "estimated_naive_cost_usd": naive_cost_usd,
+                "cost_saved_usd": cost_saved_usd,
+            },
+            "recent_runs": self.runs[-10:],
+        }
+
+    def get_run(self, doc_id: str) -> Optional[dict]:
+        """Find telemetry for a specific document ID."""
+        for run in reversed(self.runs):
+            if run.get("doc_id") == doc_id:
+                return run
+        return None
+
+    def clear(self) -> None:
+        """Reset all tracked metrics."""
+        self.runs.clear()
+        self.cumulative_pages = 0
+        self.cumulative_skipped_pages = 0
+        self.cumulative_api_calls = 0
+        self.cumulative_local_facts = 0
+        self.cumulative_llm_facts = 0
+        self.cumulative_cost_usd = 0.0
+
+
+# Global tracker instance
+global_telemetry = TelemetryTracker()
+

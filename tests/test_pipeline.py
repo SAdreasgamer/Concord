@@ -779,5 +779,87 @@ def test_rest_api_endpoints_comprehensive(monkeypatch):
         assert r.status_code == 404
 
 
+def test_confidence_weighted_relationships():
+    """Verify that Relationship models compute and carry agreement_strength."""
+    from backend.models import CandidatePair, Fact, MatchSource, RelationType
+    from backend.relation_judge import parse_judgment_dict
+
+    f1 = Fact(
+        id="f1",
+        subject="Delhivery",
+        subject_normalized="delhivery",
+        attribute="Revenue",
+        attribute_normalized="revenue",
+        value="2075.54",
+        source_doc="doc1.pdf",
+        source_doc_id="d1",
+        page=1,
+        evidence_quote="Revenue 2075.54 Cr",
+        claim_fingerprint="delhivery::revenue::fy24",
+        confidence=0.95,
+    )
+    f2 = Fact(
+        id="f2",
+        subject="Delhivery",
+        subject_normalized="delhivery",
+        attribute="Revenue",
+        attribute_normalized="revenue",
+        value="2080.00",
+        source_doc="doc2.pdf",
+        source_doc_id="d2",
+        page=5,
+        evidence_quote="Approx 2080 Cr",
+        claim_fingerprint="delhivery::revenue::fy24",
+        confidence=0.70,
+    )
+    pair = CandidatePair(
+        fact_1=f1,
+        fact_2=f2,
+        match_source=MatchSource.STRUCTURAL,
+        is_intra_document=False,
+    )
+
+    data = {
+        "relation_type": "contradicts",
+        "reconciling_factor": "none",
+        "explanation": "Values differ slightly (2075.54 vs 2080.00).",
+    }
+    rel = parse_judgment_dict(data, pair)
+    assert rel.relation_type == RelationType.CONTRADICTS
+    assert rel.agreement_strength == 0.70  # min(0.95, 0.70)
 
 
+def test_telemetry_tracking_and_api():
+    """Verify pipeline telemetry tracking, reduction calculation, and API summary."""
+    from backend.telemetry import PipelineTelemetry, TelemetryTracker
+    from fastapi.testclient import TestClient
+    from backend.main import app
+
+    tracker = TelemetryTracker()
+
+    t1 = PipelineTelemetry()
+    t1.total_pages = 27
+    t1.pages_skipped = 5
+    t1.record_llm_call(input_tokens=1000, output_tokens=200)
+    t1.record_llm_call(input_tokens=1200, output_tokens=250)
+    t1.facts_from_llm = 20
+    t1.facts_from_local_tables = 63
+    t1.compute_cost_estimate()
+
+    tracker.record_run(doc_id="doc-test-1", doc_name="q4_earnings.pdf", telemetry=t1)
+    summary = tracker.get_summary()
+
+    assert summary["total_runs"] == 1
+    assert summary["cumulative_pages"] == 27
+    assert summary["cumulative_skipped_pages"] == 5
+    assert summary["cumulative_local_facts"] == 63
+    assert summary["local_extraction_ratio_pct"] > 70.0
+    assert summary["naive_baseline"]["naive_extraction_calls"] == 27
+    assert summary["naive_baseline"]["actual_extraction_calls"] == 2
+    assert summary["naive_baseline"]["calls_saved"] == 25
+
+    # Test API endpoint
+    client = TestClient(app)
+    resp = client.get("/api/telemetry")
+    assert resp.status_code == 200
+    assert "cumulative_pages" in resp.json()

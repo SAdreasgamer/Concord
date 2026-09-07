@@ -124,6 +124,7 @@ class Relationship(BaseModel):
     explanation: str
     match_source: MatchSource
     is_intra_document: bool = False
+    agreement_strength: float = 1.0
     created_at: Optional[datetime] = None
 
 

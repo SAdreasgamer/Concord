@@ -112,6 +112,25 @@ document.addEventListener("DOMContentLoaded", () => {
         modalRelCount: document.getElementById("modalRelCount"),
         modalRelationshipsList: document.getElementById("modalRelationshipsList"),
 
+        // Telemetry & Efficiency
+        runTelemetryBanner: document.getElementById("runTelemetryBanner"),
+        telemetryDocName: document.getElementById("telemetryDocName"),
+        telemetryEfficiencyBadge: document.getElementById("telemetryEfficiencyBadge"),
+        closeTelemetryBannerBtn: document.getElementById("closeTelemetryBannerBtn"),
+        telemetryApiCalls: document.getElementById("telemetryApiCalls"),
+        telemetryApiCallsSub: document.getElementById("telemetryApiCallsSub"),
+        telemetryLocalFacts: document.getElementById("telemetryLocalFacts"),
+        telemetryPagesFiltered: document.getElementById("telemetryPagesFiltered"),
+        telemetryPagesFilteredSub: document.getElementById("telemetryPagesFilteredSub"),
+        telemetryCost: document.getElementById("telemetryCost"),
+        telemetryDuration: document.getElementById("telemetryDuration"),
+        refreshTelemetryBtn: document.getElementById("refreshTelemetryBtn"),
+        statEffCallsSaved: document.getElementById("statEffCallsSaved"),
+        statEffLocalFacts: document.getElementById("statEffLocalFacts"),
+        statEffPagesSkipped: document.getElementById("statEffPagesSkipped"),
+        statEffCostSaved: document.getElementById("statEffCostSaved"),
+        telemetryRunsBody: document.getElementById("telemetryRunsBody"),
+
         // Toasts
         toastContainer: document.getElementById("toastContainer"),
     };
@@ -258,6 +277,19 @@ document.addEventListener("DOMContentLoaded", () => {
                 closeFactModal();
             }
         });
+
+        // Telemetry Banner Close & Refresh
+        if (elements.closeTelemetryBannerBtn) {
+            elements.closeTelemetryBannerBtn.addEventListener("click", () => {
+                elements.runTelemetryBanner.classList.add("hidden");
+            });
+        }
+        if (elements.refreshTelemetryBtn) {
+            elements.refreshTelemetryBtn.addEventListener("click", () => {
+                fetchTelemetryData();
+                showToast("Telemetry metrics refreshed", "info");
+            });
+        }
     }
 
     // --- Tab Switching ---
@@ -275,6 +307,8 @@ document.addEventListener("DOMContentLoaded", () => {
             fetchCanonicals();
         } else if (tabName === "compare") {
             populateCompareDropdowns();
+        } else if (tabName === "efficiency") {
+            fetchTelemetryData();
         }
     }
 
@@ -342,6 +376,7 @@ document.addEventListener("DOMContentLoaded", () => {
             fetchFacts(),
             fetchRelationships(),
             fetchCanonicals(),
+            fetchTelemetryData(),
         ]);
     }
 
@@ -441,6 +476,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 showToast(`PDF parsed (${data.page_count} pages). Set an API Key to extract facts.`, "info");
             }
 
+            if (data.telemetry) {
+                displayRunTelemetry(data.doc_name || file.name, data.telemetry);
+            }
+
             await refreshAllData();
         } catch (e) {
             finishProgressUI();
@@ -477,6 +516,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
             finishProgressUI();
             showToast(`Loaded ${data.doc_name}! Facts: ${data.fact_count}`, "success");
+            if (data.telemetry) {
+                displayRunTelemetry(data.doc_name, data.telemetry);
+            }
             await refreshAllData();
         } catch (e) {
             finishProgressUI();
@@ -612,11 +654,18 @@ document.addEventListener("DOMContentLoaded", () => {
                         ? "Lane 1: Structural Match"
                         : "Lane 2: Embedding Similarity";
 
+                const strength = rel.agreement_strength !== undefined && rel.agreement_strength !== null ? rel.agreement_strength : 1.0;
+                const strengthPct = Math.round(strength * 100);
+                const strengthBadge = strength >= 0.8
+                    ? `<span class="rel-strength-chip strength-high" title="Extraction Agreement Strength: ${strengthPct}%">🎯 ${strengthPct}% Confidence</span>`
+                    : `<span class="rel-strength-chip strength-low" title="Low Evidence Confidence: ${strengthPct}%">⚠️ ${strengthPct}% Confidence</span>`;
+
                 return `
                 <div class="relation-card card-${rel.relation_type}">
                     <div class="relation-card-header">
-                        <div style="display:flex; align-items:center; gap:0.5rem;">
+                        <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
                             <span class="rel-badge ${badgeClass}">${badgeIcon} ${badgeText}</span>
+                            ${strengthBadge}
                             ${factorBadge}
                             ${rel.is_intra_document ? '<span class="badge" style="background:rgba(245,158,11,0.15); color:#fcd34d;">Intra-Document</span>' : ''}
                         </div>
@@ -1080,6 +1129,140 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function closeFactModal() {
         elements.factModal.classList.add("hidden");
+    }
+
+    // --- Pipeline Efficiency & Telemetry ---
+    function displayRunTelemetry(docName, telemetry) {
+        if (!telemetry || !elements.runTelemetryBanner) return;
+
+        const eff = telemetry.pipeline_efficiency || {};
+        const ext = telemetry.extraction || {};
+        const api = telemetry.api_usage || {};
+        const perf = telemetry.performance || {};
+
+        if (elements.telemetryDocName) {
+            elements.telemetryDocName.textContent = docName || "Uploaded Document";
+        }
+
+        const totalPages = eff.total_pages || 0;
+        const skipped = eff.pages_skipped || 0;
+        const skippedPct = eff.pages_saved_pct || 0;
+
+        const apiCalls = api.total_api_calls || 0;
+        const baselineCalls = totalPages || 0;
+        const extCalls = api.extraction_api_calls || 1;
+        const savedCalls = Math.max(0, baselineCalls - extCalls);
+        const savingsFactor = (baselineCalls > 0 && extCalls > 0)
+            ? (baselineCalls / extCalls).toFixed(1)
+            : "1.0";
+
+        if (elements.telemetryEfficiencyBadge) {
+            elements.telemetryEfficiencyBadge.textContent = `${savingsFactor}x API Savings`;
+        }
+        if (elements.telemetryApiCalls) {
+            elements.telemetryApiCalls.textContent = `${apiCalls} calls`;
+        }
+        if (elements.telemetryApiCallsSub) {
+            elements.telemetryApiCallsSub.textContent = `vs ~${baselineCalls} naive (${savedCalls} calls avoided)`;
+        }
+
+        const localFacts = ext.facts_from_local_tables || 0;
+        if (elements.telemetryLocalFacts) {
+            elements.telemetryLocalFacts.textContent = `${localFacts} facts`;
+        }
+
+        if (elements.telemetryPagesFiltered) {
+            elements.telemetryPagesFiltered.textContent = `${skipped} of ${totalPages} pages`;
+        }
+        if (elements.telemetryPagesFilteredSub) {
+            elements.telemetryPagesFilteredSub.textContent = `${skippedPct}% filtered without LLM`;
+        }
+
+        const costUsd = api.estimated_cost_usd || 0;
+        const durationSec = perf.total_duration_seconds || 0;
+        if (elements.telemetryCost) {
+            elements.telemetryCost.textContent = `$${costUsd.toFixed(4)}`;
+        }
+        if (elements.telemetryDuration) {
+            elements.telemetryDuration.textContent = `in ${durationSec.toFixed(1)}s`;
+        }
+
+        elements.runTelemetryBanner.classList.remove("hidden");
+    }
+
+    async function fetchTelemetryData() {
+        try {
+            const resp = await fetch("/api/telemetry");
+            if (!resp.ok) return;
+            const data = await resp.json();
+            renderTelemetryDashboard(data);
+        } catch (e) {
+            console.error("Error fetching telemetry data:", e);
+        }
+    }
+
+    function renderTelemetryDashboard(data) {
+        if (!data) return;
+
+        const baseline = data.naive_baseline || {};
+        const callsSaved = baseline.calls_saved || 0;
+        const reductionFactor = baseline.reduction_factor || "1.0x";
+
+        if (elements.statEffCallsSaved) {
+            elements.statEffCallsSaved.textContent = `${callsSaved} (${reductionFactor})`;
+        }
+        if (elements.statEffLocalFacts) {
+            elements.statEffLocalFacts.textContent = `${data.cumulative_local_facts || 0} (${data.local_extraction_ratio_pct || 0}%)`;
+        }
+        if (elements.statEffPagesSkipped) {
+            elements.statEffPagesSkipped.textContent = `${data.cumulative_skipped_pages || 0} (${data.pages_saved_pct || 0}%)`;
+        }
+        if (elements.statEffCostSaved) {
+            elements.statEffCostSaved.textContent = `$${(baseline.cost_saved_usd || 0).toFixed(4)}`;
+        }
+
+        // Render Recent Runs Table
+        const runs = data.recent_runs || [];
+        if (!elements.telemetryRunsBody) return;
+
+        if (runs.length === 0) {
+            elements.telemetryRunsBody.innerHTML = `
+                <tr>
+                    <td colspan="9" class="text-center text-muted">No document runs recorded yet. Upload a PDF or click a sample dataset above to see live metrics.</td>
+                </tr>
+            `;
+            return;
+        }
+
+        elements.telemetryRunsBody.innerHTML = runs.map((run) => {
+            const eff = run.pipeline_efficiency || {};
+            const ext = run.extraction || {};
+            const api = run.api_usage || {};
+            const perf = run.performance || {};
+            const totalP = eff.total_pages || 0;
+            const skipP = eff.pages_skipped || 0;
+            const localF = ext.facts_from_local_tables || 0;
+            const llmF = ext.facts_from_llm || 0;
+            const calls = api.total_api_calls || 0;
+            const extCalls = api.extraction_api_calls || 1;
+            const factor = totalP > 0 ? (totalP / Math.max(extCalls, 1)).toFixed(1) + "x" : "1.0x";
+            const cost = `$${(api.estimated_cost_usd || 0).toFixed(4)}`;
+            const dur = `${(perf.total_duration_seconds || 0).toFixed(1)}s`;
+
+            return `
+                <tr>
+                    <td><strong>${escapeHtml(run.doc_name || run.doc_id)}</strong></td>
+                    <td>${totalP}</td>
+                    <td><span class="badge ${skipP > 0 ? 'badge-accent' : ''}">${skipP} (${eff.pages_saved_pct || 0}%)</span></td>
+                    <td><span class="badge badge-corroborates">${localF}</span></td>
+                    <td>${llmF}</td>
+                    <td><strong>${calls}</strong></td>
+                    <td><span class="badge badge-accent">${factor}</span></td>
+                    <td>${cost}</td>
+                    <td>${dur}</td>
+                </tr>
+            `;
+        }).join("");
     }
 
     // --- Toast Notifications ---

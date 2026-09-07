@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS relationships (
     explanation         TEXT NOT NULL,
     match_source        TEXT NOT NULL,
     is_intra_document   INTEGER NOT NULL DEFAULT 0,
+    agreement_strength  REAL NOT NULL DEFAULT 1.0,
     created_at          TEXT NOT NULL
 );
 
@@ -106,6 +107,10 @@ class Database:
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA_SQL)
+        try:
+            await self._db.execute("ALTER TABLE relationships ADD COLUMN agreement_strength REAL DEFAULT 1.0")
+        except Exception:
+            pass
         await self._db.commit()
 
     async def close(self) -> None:
@@ -283,8 +288,8 @@ class Database:
         await self.db.execute(
             "INSERT INTO relationships "
             "(id, fact_id_1, fact_id_2, relation_type, reconciling_factor, "
-            " explanation, match_source, is_intra_document, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " explanation, match_source, is_intra_document, agreement_strength, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rel_id,
                 rel["fact_id_1"],
@@ -294,6 +299,7 @@ class Database:
                 rel["explanation"],
                 rel["match_source"],
                 1 if rel.get("is_intra_document") else 0,
+                float(rel.get("agreement_strength", 1.0)),
                 _now_iso(),
             ),
         )

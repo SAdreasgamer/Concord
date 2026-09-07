@@ -347,26 +347,29 @@ async def extract_facts_from_batch(
                 or "quota" in err_msg
                 or "resource_exhausted" in err_msg
             )
-            if is_rate_limit and attempt < max_retries - 1:
-                delay = 5.0 * (attempt + 1)
-                logger.warning(
-                    "Rate limit on batch pages %s (attempt %d/%d). Backing off %.1fs...",
-                    page_range,
-                    attempt + 1,
-                    max_retries,
-                    delay,
-                )
-                await asyncio.sleep(delay)
+            if is_rate_limit:
+                if attempt < max_retries - 1 and "quota" not in err_msg:
+                    delay = 3.0 * (attempt + 1)
+                    logger.warning(
+                        "Rate limit on batch pages %s (attempt %d/%d). Backing off %.1fs...",
+                        page_range,
+                        attempt + 1,
+                        max_retries,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.warning("Batch extraction hit rate limit / quota on pages %s. Skipping batch without per-page fallback.", page_range)
+                    raise e
             else:
                 logger.error("Batch extraction failed for pages %s: %s", page_range, e)
-                # Fallback: try individual pages
+                # Fallback: try individual pages ONLY for format/JSON errors
                 logger.info("Falling back to individual page extraction for pages %s", page_range)
                 all_facts = []
                 for chunk in chunks:
                     try:
                         facts = await extract_facts_from_chunk(chunk, api_key, model)
                         all_facts.extend(facts)
-                        await asyncio.sleep(1.0)
                     except Exception as inner_e:
                         logger.warning("Skipping page %d: %s", chunk.page_number, inner_e)
                 return all_facts
@@ -474,6 +477,13 @@ async def extract_document_facts(
             telemetry.facts_from_llm += len(batch_facts)
             telemetry.record_llm_call()  # Token counts tracked inside
         except Exception as e:
+            err_str = str(e).lower()
+            if "quota" in err_str or "resource_exhausted" in err_str:
+                logger.warning(
+                    "Free-tier API quota exhausted. Breaking batch loop to preserve %d extracted facts (including local table extractions).",
+                    len(all_extracted),
+                )
+                break
             logger.warning(
                 "Skipping batch pages %d-%d: %s",
                 batch[0].page_number,

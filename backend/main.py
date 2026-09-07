@@ -481,6 +481,8 @@ async def load_sample_dataset(
             }
 
     telemetry.stop()
+    from backend.telemetry import global_telemetry
+    global_telemetry.record_run(doc_id, doc_name, telemetry)
 
     return {
         "doc_id": doc_id,
@@ -617,6 +619,8 @@ async def upload_pdf(
             }
 
     telemetry.stop()
+    from backend.telemetry import global_telemetry
+    global_telemetry.record_run(doc_id, doc_name, telemetry)
 
     return {
         "doc_id": doc_id,
@@ -706,6 +710,8 @@ async def process_document(
         stage_match.stop()
 
     telemetry.stop()
+    from backend.telemetry import global_telemetry
+    global_telemetry.record_run(doc_id, doc.get("doc_name", doc_id), telemetry)
 
     return {
         "doc_id": doc_id,
@@ -716,6 +722,26 @@ async def process_document(
         "relationships": [r.model_dump() for r in relationships],
         "telemetry": telemetry.to_dict(),
     }
+
+
+@app.get("/api/telemetry")
+async def get_telemetry_summary():
+    """
+    Return pipeline telemetry and efficiency metrics across ingestion runs.
+    Demonstrates multi-page batching, local table parsing, and heuristic pre-filtering savings.
+    """
+    from backend.telemetry import global_telemetry
+    return global_telemetry.get_summary()
+
+
+@app.get("/api/documents/{doc_id}/telemetry")
+async def get_document_telemetry(doc_id: str):
+    """Return telemetry for a specific document run if available."""
+    from backend.telemetry import global_telemetry
+    data = global_telemetry.get_run(doc_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="No telemetry recorded for this document run.")
+    return data
 
 
 from pydantic import BaseModel

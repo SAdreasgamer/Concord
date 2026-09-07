@@ -71,6 +71,10 @@ def parse_judgment_dict(data: dict[str, Any], pair: CandidatePair) -> Relationsh
     rel_type = normalize_relation_type(raw_rel)
     reconciling_factor = normalize_reconciling_factor(raw_factor, rel_type)
 
+    c1 = getattr(pair.fact_1, "confidence", 1.0) or 1.0
+    c2 = getattr(pair.fact_2, "confidence", 1.0) or 1.0
+    strength = round(min(float(c1), float(c2)), 2)
+
     return Relationship(
         id=str(uuid.uuid4()),
         fact_id_1=pair.fact_1.id,
@@ -80,6 +84,7 @@ def parse_judgment_dict(data: dict[str, Any], pair: CandidatePair) -> Relationsh
         explanation=str(explanation).strip(),
         match_source=pair.match_source,
         is_intra_document=pair.is_intra_document,
+        agreement_strength=strength,
     )
 
 
@@ -198,8 +203,8 @@ async def judge_single_pair(
                 or "quota" in err_msg
                 or "resource_exhausted" in err_msg
             )
-            if is_rate_limit and attempt < max_retries - 1:
-                delay = 5.0 * (attempt + 1)
+            if is_rate_limit and attempt < max_retries - 1 and "quota" not in err_msg:
+                delay = 2.0 * (attempt + 1)
                 logger.warning(
                     "Rate limit in relation judge (attempt %d/%d). Backing off for %.1fs...",
                     attempt + 1,
@@ -252,8 +257,8 @@ async def judge_batch_pairs(
                 or "quota" in err_msg
                 or "resource_exhausted" in err_msg
             )
-            if is_rate_limit and attempt < max_retries - 1:
-                delay = 5.0 * (attempt + 1)
+            if is_rate_limit and attempt < max_retries - 1 and "quota" not in err_msg:
+                delay = 3.0 * (attempt + 1)
                 logger.warning(
                     "Rate limit in batch judge (attempt %d/%d). Backing off for %.1fs...",
                     attempt + 1,
@@ -263,6 +268,9 @@ async def judge_batch_pairs(
                 await asyncio.sleep(delay)
             else:
                 logger.warning("Batch judging attempt failed (%s)", e)
+                if is_rate_limit:
+                    # Do not fall back to per-pair calls if rate limited or quota exhausted
+                    return []
                 break
 
     if judgments_raw is not None:
@@ -276,12 +284,15 @@ async def judge_batch_pairs(
             if matching_j:
                 results.append(parse_judgment_dict(matching_j, pair))
             else:
-                single_rel = await judge_single_pair(pair, api_key, model)
-                results.append(single_rel)
+                try:
+                    single_rel = await judge_single_pair(pair, api_key, model)
+                    results.append(single_rel)
+                except Exception:
+                    pass
         return results
 
-    # Fallback to individual pair evaluations if batch failed
-    logger.warning("Batch judging failed, falling back to individual pair evaluations")
+    # Fallback to individual pair evaluations ONLY for format/JSON errors
+    logger.warning("Batch judging format failed, falling back to individual pair evaluations")
     results = []
     for pair in pairs:
         try:
@@ -289,6 +300,8 @@ async def judge_batch_pairs(
             results.append(rel)
         except Exception as inner_e:
             logger.error("Failed to judge pair %s vs %s: %s", pair.fact_1.id, pair.fact_2.id, inner_e)
+            if "quota" in str(inner_e).lower() or "resource_exhausted" in str(inner_e).lower():
+                break
     return results
 
 
@@ -321,6 +334,9 @@ async def judge_and_store_candidates(
     for i in range(0, len(candidates), batch_size):
         batch = candidates[i : i + batch_size]
         batch_results = await judge_batch_pairs(batch, api_key=api_key, model=model)
+        if not batch_results and len(candidates) > batch_size:
+            logger.warning("Judging batch returned no results (rate limit / quota). Halting further candidate evaluations.")
+            break
 
         for rel in batch_results:
             # Check if relationship already exists

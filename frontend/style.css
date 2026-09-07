@@ -1720,3 +1720,181 @@ code, pre {
     line-height: 1.5;
 }
 
+/* ==========================================================================
+   Hybrid Pipeline Telemetry & Cost Efficiency Styling
+   ========================================================================== */
+
+/* Telemetry Banner (Runs directly after ingestion) */
+.telemetry-banner {
+    margin-top: 1rem;
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(16, 185, 129, 0.05));
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: var(--radius-md);
+    padding: 1.25rem;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    animation: fadeIn 0.3s ease;
+}
+
+.telemetry-banner-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.telemetry-banner-title {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.telemetry-banner-title h4 {
+    font-size: 1rem;
+    font-weight: 700;
+}
+
+.telemetry-banner-title .telemetry-icon {
+    font-size: 1.2rem;
+}
+
+.btn-close-sm {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.1rem;
+    cursor: pointer;
+    padding: 0.2rem 0.5rem;
+    border-radius: var(--radius-sm);
+    transition: var(--transition);
+}
+
+.btn-close-sm:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.telemetry-chips-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.75rem;
+}
+
+.telemetry-chip {
+    background: rgba(17, 19, 27, 0.6);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 0.75rem 1rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.telemetry-chip-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+
+.telemetry-chip-val {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.telemetry-chip-val.highlight {
+    color: #a5b4fc;
+}
+
+.telemetry-chip-val.success {
+    color: var(--corroborates);
+}
+
+.telemetry-chip-sub {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 0.2rem;
+}
+
+/* Efficiency Tab */
+.efficiency-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1.5rem;
+}
+
+.efficiency-title {
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin-bottom: 0.25rem;
+}
+
+.efficiency-subtitle {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.efficiency-metrics-strip {
+    margin-bottom: 2rem;
+}
+
+.architecture-contrast-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+}
+
+.contrast-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.contrast-table th, .contrast-table td {
+    padding: 0.85rem 1rem;
+}
+
+.contrast-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.telemetry-runs-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: 1.5rem;
+}
+
+.telemetry-runs-card h4 {
+    margin-bottom: 1rem;
+}
+
+/* Strength and Confidence Badges */
+.rel-strength-chip {
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.2rem 0.55rem;
+    border-radius: 12px;
+    letter-spacing: 0.02em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.rel-strength-chip.strength-high {
+    background: rgba(16, 185, 129, 0.12);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.rel-strength-chip.strength-low {
+    background: rgba(245, 158, 11, 0.12);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
