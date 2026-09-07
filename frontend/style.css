@@ -1,0 +1,6 @@
+/* Concord — Styles (placeholder, will be built out in Phase 7) */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; padding: 2rem; background: #0f0f0f; color: #e0e0e0; }
+header h1 { font-size: 1.5rem; }
+header p { color: #888; }
+code { background: #1a1a2e; padding: 0.2rem 0.5rem; border-radius: 4px; }
