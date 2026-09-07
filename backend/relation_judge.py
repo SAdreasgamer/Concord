@@ -305,41 +305,79 @@ async def judge_batch_pairs(
     return results
 
 
+def try_deterministic_corroboration(pair: CandidatePair) -> Optional[Relationship]:
+    """
+    If two facts share identical claim fingerprint (same entity, attribute, temporal scope)
+    and identical value and unit, resolve corroboration deterministically with ZERO API calls.
+    """
+    f1 = pair.fact_1
+    f2 = pair.fact_2
+
+    if f1.claim_fingerprint and f2.claim_fingerprint and f1.claim_fingerprint == f2.claim_fingerprint:
+        v1 = f1.value.strip().lower().replace(",", "")
+        v2 = f2.value.strip().lower().replace(",", "")
+        u1 = (f1.unit or "").strip().lower()
+        u2 = (f2.unit or "").strip().lower()
+
+        if v1 == v2 and (not u1 or not u2 or u1 == u2):
+            strength = round(min(float(f1.confidence), float(f2.confidence)), 2)
+            return Relationship(
+                id=str(uuid.uuid4()),
+                fact_id_1=f1.id,
+                fact_id_2=f2.id,
+                relation_type=RelationType.CORROBORATES,
+                reconciling_factor=ReconcilingFactor.NONE,
+                explanation=f"Deterministic match: both sources independently verify {f1.subject} {f1.attribute} as {f1.value} {f1.unit or ''} for {f1.temporal_scope or 'unspecified period'}.",
+                match_source=pair.match_source,
+                is_intra_document=pair.is_intra_document,
+                agreement_strength=strength,
+            )
+    return None
+
+
 async def judge_and_store_candidates(
     candidates: list[CandidatePair],
     db: Database,
     api_key: str,
     model: Optional[str] = None,
-    batch_size: int = 5,
+    batch_size: int = 8,
 ) -> list[Relationship]:
     """
-    Judge all candidate pairs in batches and persist them to the database.
-
-    Args:
-        candidates: Candidate pairs from the candidate matcher.
-        db: Database manager instance.
-        api_key: User's LLM API key.
-        model: Optional model override.
-        batch_size: Number of pairs per LLM call.
-
-    Returns:
-        List of persisted Relationship models.
+    Judge all candidate pairs and persist them to the database.
+    Resolves identical facts deterministically with 0 API calls, and batches remaining pairs.
     """
     if not candidates:
         return []
 
     judged_relationships: list[Relationship] = []
 
-    # Process in batches
-    for i in range(0, len(candidates), batch_size):
-        batch = candidates[i : i + batch_size]
+    # Step 1: Deterministic resolution for exact fingerprint & value matches (0 API calls)
+    pairs_for_llm: list[CandidatePair] = []
+    for pair in candidates:
+        deterministic_rel = try_deterministic_corroboration(pair)
+        if deterministic_rel:
+            if not await db.relationship_exists(deterministic_rel.fact_id_1, deterministic_rel.fact_id_2):
+                await db.insert_relationship(deterministic_rel.model_dump())
+                judged_relationships.append(deterministic_rel)
+        else:
+            pairs_for_llm.append(pair)
+
+    logger.info(
+        "Candidate judging: %d pairs resolved deterministically (0 API calls), %d sent to LLM",
+        len(judged_relationships),
+        len(pairs_for_llm),
+    )
+
+    # Step 2: Batch remaining pairs to LLM
+    effective_batch_size = max(batch_size, 8)
+    for i in range(0, len(pairs_for_llm), effective_batch_size):
+        batch = pairs_for_llm[i : i + effective_batch_size]
         batch_results = await judge_batch_pairs(batch, api_key=api_key, model=model)
-        if not batch_results and len(candidates) > batch_size:
+        if not batch_results and len(pairs_for_llm) > effective_batch_size:
             logger.warning("Judging batch returned no results (rate limit / quota). Halting further candidate evaluations.")
             break
 
         for rel in batch_results:
-            # Check if relationship already exists
             if not await db.relationship_exists(rel.fact_id_1, rel.fact_id_2):
                 await db.insert_relationship(rel.model_dump())
                 judged_relationships.append(rel)

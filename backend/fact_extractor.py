@@ -435,6 +435,7 @@ async def extract_document_facts(
             continue
 
         # --- Stage 2: LOCAL TABLE EXTRACTION (no LLM) ---
+        has_extracted_local = False
         if classification.should_extract_tables_locally and chunk.tables:
             for table_data in chunk.tables:
                 local_facts = extract_facts_from_table(
@@ -445,8 +446,19 @@ async def extract_document_facts(
                 if local_facts:
                     all_extracted.extend(local_facts)
                     telemetry.facts_from_local_tables += len(local_facts)
+                    has_extracted_local = True
 
-        # Still send to LLM for narrative content on the same page
+            # If page is primarily a table, do not waste LLM calls on it!
+            if classification.page_type in (PageType.TABLE_FINANCIAL, PageType.TABLE_STRUCTURED):
+                telemetry.pages_with_local_tables += 1
+                logger.info(
+                    "Page %d: Extracted %d facts locally via PyMuPDF table finder. Skipping LLM to save quota.",
+                    chunk.page_number,
+                    telemetry.facts_from_local_tables,
+                )
+                continue
+
+        # Send to LLM only if it has narrative content
         pages_for_llm.append(chunk)
 
     stage_classify.stop()
@@ -462,7 +474,7 @@ async def extract_document_facts(
 
     # --- Stage 3: BATCH LLM EXTRACTION ---
     stage_extract = telemetry.start_stage("llm_extraction")
-    BATCH_SIZE = 6  # Pages per LLM call
+    BATCH_SIZE = 10  # 10 pages per call leverages Gemini's 1M context to minimize calls
 
     for batch_start in range(0, len(pages_for_llm), BATCH_SIZE):
         batch = pages_for_llm[batch_start : batch_start + BATCH_SIZE]
