@@ -239,6 +239,14 @@ class Database:
             results.append((row["id"], emb))
         return results
 
+    async def update_fact_embedding(self, fact_id: str, embedding: bytes) -> None:
+        """Update the embedding BLOB for an existing fact."""
+        await self.db.execute(
+            "UPDATE facts SET embedding = ? WHERE id = ?",
+            (embedding, fact_id),
+        )
+        await self.db.commit()
+
     # --- Relationships ---
 
     async def insert_relationship(self, rel: dict) -> str:

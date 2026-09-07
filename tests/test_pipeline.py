@@ -286,3 +286,231 @@ async def test_process_and_store_facts_pipeline(tmp_path):
     finally:
         await db.close()
 
+
+def test_embedding_service_operations():
+    """Verify embedding generation, vector serialization, and cosine similarity."""
+    import numpy as np
+
+    from backend.config import EMBEDDING_DIMENSION
+    from backend.embeddings import EmbeddingService, format_fact_for_embedding
+    from backend.models import Fact
+
+    service = EmbeddingService()
+
+    fact1 = Fact(
+        id="f1",
+        subject="Delhivery",
+        subject_normalized="delhivery",
+        attribute="Revenue",
+        attribute_normalized="revenue",
+        value="2075.54",
+        unit="INR Cr",
+        temporal_scope="Q4_FY24",
+        claim_fingerprint="delhivery::revenue::q4_fy24",
+        source_doc="doc1.pdf",
+        source_doc_id="d1",
+        page=1,
+        evidence_quote="Revenue was 2075.54 INR Cr",
+    )
+
+    formatted = format_fact_for_embedding(fact1)
+    assert "delhivery" in formatted
+    assert "2075.54" in formatted
+
+    vec1 = service.embed_fact(fact1)
+    assert isinstance(vec1, np.ndarray)
+    assert vec1.shape == (EMBEDDING_DIMENSION,)
+    assert vec1.dtype == np.float32
+
+    # Serialization test
+    blob = service.to_bytes(vec1)
+    recovered = service.from_bytes(blob)
+    assert np.allclose(vec1, recovered)
+
+    # Cosine similarity: self similarity should be ~1.0
+    self_sim = service.cosine_similarity(vec1, vec1)
+    assert abs(self_sim - 1.0) < 1e-4
+
+
+def test_candidate_matching_structural_and_siblings():
+    """Verify Lane 1 structural matching classifies hints and excludes sibling facts."""
+    from backend.matcher import match_facts_in_memory
+    from backend.models import Fact, MatchSource
+
+    # Fact 1: Delhivery Q4 revenue in Doc 1
+    f1 = Fact(
+        id="fact-1",
+        subject="Delhivery",
+        subject_normalized="delhivery",
+        attribute="Revenue from operations",
+        attribute_normalized="revenue_operations",
+        value="2075.54",
+        unit="INR Crore",
+        temporal_scope="Q4_FY24",
+        claim_fingerprint="delhivery::revenue_operations::q4_fy24",
+        extraction_group_id="group_a",
+        source_doc="earnings_doc.pdf",
+        source_doc_id="doc_a",
+        page=2,
+        evidence_quote="Q4 revenue stood at 2075.54 Cr",
+    )
+
+    # Fact 2: Sibling of Fact 1 from same sentence (e.g. YoY growth)
+    f2_sibling = Fact(
+        id="fact-2",
+        subject="Delhivery",
+        subject_normalized="delhivery",
+        attribute="Revenue from operations",
+        attribute_normalized="revenue_operations",
+        value="12",
+        unit="%",
+        temporal_scope="Q4_FY24",
+        claim_fingerprint="delhivery::revenue_operations::q4_fy24",
+        extraction_group_id="group_a",  # SAME GROUP AS F1
+        source_doc="earnings_doc.pdf",
+        source_doc_id="doc_a",
+        page=2,
+        evidence_quote="representing 12% growth",
+    )
+
+    # Fact 3: Same company, same metric, same period in Doc 2 (Corroboration candidate)
+    f3 = Fact(
+        id="fact-3",
+        subject="Delhivery Limited",
+        subject_normalized="delhivery",
+        attribute="Revenue from operations",
+        attribute_normalized="revenue_operations",
+        value="2075",
+        unit="INR Crore",
+        temporal_scope="Q4_FY24",
+        claim_fingerprint="delhivery::revenue_operations::q4_fy24",
+        extraction_group_id="group_b",
+        source_doc="press_release.pdf",
+        source_doc_id="doc_b",
+        page=1,
+        evidence_quote="Fourth quarter revenue reached approximately Rs 2075 Cr",
+    )
+
+    # Fact 4: Same company & metric, DIFFERENT period (Reconciliation candidate)
+    f4 = Fact(
+        id="fact-4",
+        subject="Delhivery",
+        subject_normalized="delhivery",
+        attribute="Revenue from operations",
+        attribute_normalized="revenue_operations",
+        value="1850.20",
+        unit="INR Crore",
+        temporal_scope="Q4_FY23",
+        claim_fingerprint="delhivery::revenue_operations::q4_fy23",
+        extraction_group_id="group_c",
+        source_doc="annual_report.pdf",
+        source_doc_id="doc_c",
+        page=4,
+        evidence_quote="Previous year Q4 revenue was 1850.20 Cr",
+    )
+
+    candidates = match_facts_in_memory([f1, f2_sibling, f3, f4])
+
+    # Sibling pair (f1, f2_sibling) MUST NOT be matched
+    sibling_pairs = [
+        c
+        for c in candidates
+        if (c.fact_1.id == "fact-1" and c.fact_2.id == "fact-2")
+        or (c.fact_1.id == "fact-2" and c.fact_2.id == "fact-1")
+    ]
+    assert len(sibling_pairs) == 0, "Sibling facts from same sentence should not be paired"
+
+    # Exact scope match (f1 and f3)
+    exact_pairs = [
+        c
+        for c in candidates
+        if {c.fact_1.id, c.fact_2.id} == {"fact-1", "fact-3"}
+    ]
+    assert len(exact_pairs) == 1
+    assert exact_pairs[0].match_hint == "exact_scope"
+    assert exact_pairs[0].match_source == MatchSource.STRUCTURAL
+    assert exact_pairs[0].is_intra_document is False
+
+    # Different scope match (f1 and f4)
+    diff_pairs = [
+        c
+        for c in candidates
+        if {c.fact_1.id, c.fact_2.id} == {"fact-1", "fact-4"}
+    ]
+    assert len(diff_pairs) == 1
+    assert diff_pairs[0].match_hint == "different_scope"
+
+
+@pytest.mark.asyncio
+async def test_candidate_matcher_hybrid_with_db(tmp_path):
+    """Verify CandidateMatcher with async SQLite database and both matching lanes."""
+    from backend.database import Database
+    from backend.embeddings import EmbeddingService
+    from backend.matcher import CandidateMatcher
+    from backend.models import Fact, MatchSource
+
+    test_db_path = tmp_path / "test_matcher.db"
+    db = Database(str(test_db_path))
+    await db.connect()
+
+    try:
+        embedding_service = EmbeddingService()
+        matcher = CandidateMatcher(
+            db=db,
+            embedding_service=embedding_service,
+            embedding_threshold=0.65,
+        )
+
+        # Existing fact in Doc A
+        f1 = Fact(
+            id="f-101",
+            subject="Delhivery",
+            subject_normalized="delhivery",
+            attribute="Revenue",
+            attribute_normalized="revenue",
+            value="2075.54",
+            unit="INR Cr",
+            temporal_scope="Q4_FY24",
+            claim_fingerprint="delhivery::revenue::q4_fy24",
+            source_doc="doc_a.pdf",
+            source_doc_id="doc-a",
+            page=1,
+            evidence_quote="Revenue was 2075.54 INR Cr",
+        )
+        await db.insert_fact(f1.model_dump())
+
+        # New fact from Doc B
+        f2 = Fact(
+            id="f-102",
+            subject="Delhivery",
+            subject_normalized="delhivery",
+            attribute="Revenue",
+            attribute_normalized="revenue",
+            value="2075",
+            unit="INR Cr",
+            temporal_scope="Q4_FY24",
+            claim_fingerprint="delhivery::revenue::q4_fy24",
+            source_doc="doc_b.pdf",
+            source_doc_id="doc-b",
+            page=2,
+            evidence_quote="Delhivery posted 2075 INR Cr revenue",
+        )
+        await db.insert_fact(f2.model_dump())
+
+        # Find candidates for f2
+        candidates = await matcher.find_candidates(
+            new_facts=[f2],
+            check_existing_relationships=True,
+        )
+
+        assert len(candidates) >= 1
+        pair = candidates[0]
+        assert {pair.fact_1.id, pair.fact_2.id} == {"f-101", "f-102"}
+        assert pair.match_hint == "exact_scope"
+        assert pair.is_intra_document is False
+        # Discovered via both structural and embedding similarity
+        assert pair.match_source in (MatchSource.STRUCTURAL, MatchSource.BOTH)
+    finally:
+        await db.close()
+
+
