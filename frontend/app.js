@@ -8,7 +8,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // --- State ---
     const state = {
         apiKey: sessionStorage.getItem("concord_api_key") || "",
-        model: localStorage.getItem("concord_model") || "gemini/gemini-3.6-flash",
+        model: localStorage.getItem("concord_model") || "groq/llama-3.3-70b-versatile",
         documents: [],
         facts: [],
         relationships: [],
@@ -162,6 +162,14 @@ document.addEventListener("DOMContentLoaded", () => {
             sessionStorage.setItem("concord_api_key", state.apiKey);
             elements.keyStatusBadge.textContent = state.apiKey ? "Unverified" : "";
             elements.keyStatusBadge.className = "key-status-indicator text-muted";
+
+            // Auto-detect Groq API key (starts with gsk_)
+            if (state.apiKey.startsWith("gsk_") && !state.model.startsWith("groq/")) {
+                state.model = "groq/llama-3.3-70b-versatile";
+                elements.modelSelect.value = state.model;
+                localStorage.setItem("concord_model", state.model);
+                showToast("Detected Groq Key — switched to Llama 3.3 70B", "info");
+            }
         });
 
         elements.toggleKeyVisibility.addEventListener("click", () => {
@@ -333,9 +341,14 @@ document.addEventListener("DOMContentLoaded", () => {
             const data = await resp.json();
 
             if (resp.ok && data.valid) {
+                if (data.model && data.model !== state.model) {
+                    state.model = data.model;
+                    elements.modelSelect.value = state.model;
+                    localStorage.setItem("concord_model", state.model);
+                }
                 elements.keyStatusBadge.textContent = "✓ Valid";
                 elements.keyStatusBadge.className = "key-status-indicator text-success";
-                showToast("API Key validated successfully!", "success");
+                showToast(`API Key validated successfully (${data.model || state.model})!`, "success");
             } else {
                 elements.keyStatusBadge.textContent = "✕ Invalid";
                 elements.keyStatusBadge.className = "key-status-indicator text-danger";

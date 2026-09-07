@@ -34,7 +34,9 @@
 
             <div class="model-picker-wrap">
                 <select id="modelSelect" class="form-select" title="Select LLM Model">
-                    <option value="gemini/gemini-3.6-flash" selected>Gemini 3.6 Flash (Fast & Structured)</option>
+                    <option value="groq/llama-3.3-70b-versatile" selected>⚡ Groq — Llama 3.3 70B (Ultra Fast, High Quota)</option>
+                    <option value="groq/llama-3.1-8b-instant">⚡ Groq — Llama 3.1 8B (Instant)</option>
+                    <option value="gemini/gemini-3.6-flash">Gemini 3.6 Flash</option>
                     <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
                     <option value="gpt-4o">GPT-4o</option>
                 </select>
@@ -42,7 +44,7 @@
 
             <div class="api-key-box">
                 <div class="input-with-icon">
-                    <input type="password" id="apiKeyInput" class="form-input" placeholder="Paste Gemini API Key..." autocomplete="off">
+                    <input type="password" id="apiKeyInput" class="form-input" placeholder="Paste Groq (gsk_...) or Gemini key..." autocomplete="off">
                     <button type="button" id="toggleKeyVisibility" class="icon-btn" title="Show/Hide API Key">👁️</button>
                 </div>
                 <button type="button" id="validateKeyBtn" class="btn btn-primary btn-sm">

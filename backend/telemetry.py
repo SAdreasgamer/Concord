@@ -100,18 +100,27 @@ class PipelineTelemetry:
         self.llm_total_input_tokens += input_tokens
         self.llm_total_output_tokens += output_tokens
 
-    def compute_cost_estimate(self, model: str = "gemini/gemini-3.6-flash") -> float:
+    def compute_cost_estimate(self, model: str = "groq/llama-3.3-70b-versatile") -> float:
         """
         Estimate API cost based on token usage.
         
         Pricing (as of 2025):
+        - Groq Llama 3.3 70B: $0.59/1M input, $0.79/1M output
+        - Groq Llama 3.1 8B: $0.05/1M input, $0.08/1M output
         - Gemini Flash: $0.075/1M input tokens, $0.30/1M output tokens
         - GPT-4o: $2.50/1M input, $10/1M output
         - Claude 3.5 Sonnet: $3/1M input, $15/1M output
         """
         model_lower = model.lower()
         
-        if "gemini" in model_lower and "flash" in model_lower:
+        if "groq" in model_lower:
+            if "8b" in model_lower:
+                input_cost_per_m = 0.05
+                output_cost_per_m = 0.08
+            else:
+                input_cost_per_m = 0.59
+                output_cost_per_m = 0.79
+        elif "gemini" in model_lower and "flash" in model_lower:
             input_cost_per_m = 0.075
             output_cost_per_m = 0.30
         elif "gemini" in model_lower and "pro" in model_lower:
@@ -154,6 +163,8 @@ class PipelineTelemetry:
     def to_dict(self) -> dict:
         """Serialize telemetry to a dictionary for API responses."""
         self.total_facts = self.facts_from_llm + self.facts_from_local_tables
+        if self.estimated_cost_usd == 0.0 and (self.llm_total_input_tokens > 0 or self.llm_total_output_tokens > 0):
+            self.compute_cost_estimate()
         
         return {
             "pipeline_efficiency": {

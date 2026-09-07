@@ -280,13 +280,32 @@ async def export_data():
 # --- Key Validation ---
 
 
-def get_effective_key(header_key: Optional[str] = None) -> Optional[str]:
+def get_effective_key(header_key: Optional[str] = None, model: Optional[str] = None) -> Optional[str]:
     """Retrieve API key from request header or reload dynamically from .env file."""
     from dotenv import load_dotenv
     load_dotenv(override=True)
     if header_key and header_key.strip():
         return header_key.strip()
-    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+    if model:
+        m = model.lower()
+        if "groq" in m:
+            return os.getenv("GROQ_API_KEY") or None
+        if "gemini" in m:
+            return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None
+        if "gpt" in m or "openai" in m:
+            return os.getenv("OPENAI_API_KEY") or None
+        if "claude" in m or "anthropic" in m:
+            return os.getenv("ANTHROPIC_API_KEY") or None
+
+    return (
+        os.getenv("GROQ_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+        or os.getenv("GOOGLE_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("ANTHROPIC_API_KEY")
+        or None
+    )
 
 
 @app.post("/api/validate-key")
@@ -300,7 +319,10 @@ async def validate_key(
     from backend.config import DEFAULT_LLM_MODEL
 
     test_model = model or DEFAULT_LLM_MODEL
-    key_to_test = get_effective_key(x_api_key)
+    key_to_test = get_effective_key(x_api_key, model=test_model)
+
+    if key_to_test and key_to_test.startswith("gsk_") and not test_model.startswith("groq/"):
+        test_model = "groq/llama-3.3-70b-versatile"
 
     if not key_to_test:
         return JSONResponse(
@@ -431,7 +453,13 @@ async def load_sample_dataset(
     # Insert document
     await db.insert_document(doc_id, doc_name, page_count)
 
-    effective_key = get_effective_key(x_api_key)
+    from backend.config import DEFAULT_LLM_MODEL
+
+    model = model or DEFAULT_LLM_MODEL
+    effective_key = get_effective_key(x_api_key, model=model)
+    if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
+        model = "groq/llama-3.3-70b-versatile"
+
     facts_extracted = []
     relationships_found = []
     telemetry = PipelineTelemetry()
@@ -565,8 +593,13 @@ async def upload_pdf(
     page_count = get_page_count(file_bytes)
     await db.insert_document(doc_id, doc_name, page_count)
 
-    # Check for API key in header or environment
-    effective_key = get_effective_key(x_api_key)
+    from backend.config import DEFAULT_LLM_MODEL
+
+    model = model or DEFAULT_LLM_MODEL
+    effective_key = get_effective_key(x_api_key, model=model)
+    if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
+        model = "groq/llama-3.3-70b-versatile"
+
     facts_extracted = []
     relationships_found = []
     telemetry = PipelineTelemetry()
@@ -668,11 +701,17 @@ async def process_document(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Source PDF file not found on server")
 
-    effective_key = get_effective_key(x_api_key)
+    from backend.config import DEFAULT_LLM_MODEL
+
+    model = model or DEFAULT_LLM_MODEL
+    effective_key = get_effective_key(x_api_key, model=model)
+    if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
+        model = "groq/llama-3.3-70b-versatile"
+
     if not effective_key:
         raise HTTPException(
             status_code=400,
-            detail="API key required. Provide via X-API-Key header or set GEMINI_API_KEY.",
+            detail="API key required. Provide via X-API-Key header or set GROQ_API_KEY in .env.",
         )
 
     telemetry = PipelineTelemetry()
@@ -766,11 +805,17 @@ async def compare_facts_on_demand(
     from backend.models import CandidatePair, Fact, MatchSource
     from backend.relation_judge import judge_single_pair
 
-    effective_key = get_effective_key(x_api_key)
+    from backend.config import DEFAULT_LLM_MODEL
+
+    model = model or DEFAULT_LLM_MODEL
+    effective_key = get_effective_key(x_api_key, model=model)
+    if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
+        model = "groq/llama-3.3-70b-versatile"
+
     if not effective_key:
         raise HTTPException(
             status_code=400,
-            detail="API key required. Provide via X-API-Key header or set GEMINI_API_KEY.",
+            detail="API key required. Provide via X-API-Key header or set GROQ_API_KEY in .env.",
         )
 
     f1_dict = await db.get_fact(req.fact_id_1)
