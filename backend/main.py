@@ -17,9 +17,11 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import PROJECT_ROOT
 from backend.database import Database
+from backend.normalization import NormalizationRegistry
 
-# --- Database singleton ---
+# --- Singletons ---
 db = Database()
+registry = NormalizationRegistry(db)
 
 
 # --- Lifespan ---
@@ -27,6 +29,7 @@ db = Database()
 async def lifespan(app: FastAPI):
     """Startup and shutdown logic."""
     await db.connect()
+    await registry.initialize()
     yield
     await db.close()
 
@@ -183,22 +186,29 @@ async def validate_key(
         )
 
 
-# --- PDF Upload ---
+# --- PDF Upload & Processing ---
 
 
 @app.post("/api/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    model: Optional[str] = Query(None),
+    max_pages: Optional[int] = Query(None, description="Max pages to extract facts from"),
+):
     """
     Upload a PDF file for processing.
 
-    Parses the PDF into page-level text chunks and stores the document.
-    Returns the document ID and parsed chunks for verification.
-    Later phases will wire fact extraction into this endpoint.
+    Parses the PDF into page-level text chunks, saves the document, and
+    if an API key is provided (or configured in env), runs LLM fact extraction
+    and canonical normalization.
     """
+    import os
     import uuid
 
     from backend.config import UPLOAD_DIR
-    from backend.pdf_parser import parse_pdf, get_page_count
+    from backend.fact_extractor import extract_document_facts
+    from backend.pdf_parser import get_page_count, parse_pdf
 
     # Validate file type
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -235,19 +245,114 @@ async def upload_pdf(file: UploadFile = File(...)):
     page_count = get_page_count(file_bytes)
     await db.insert_document(doc_id, doc_name, page_count)
 
+    # Check for API key in header or environment
+    effective_key = x_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    facts_extracted = []
+
+    if effective_key:
+        try:
+            facts_extracted = await extract_document_facts(
+                chunks=chunks,
+                doc_id=doc_id,
+                doc_name=doc_name,
+                db=db,
+                registry=registry,
+                api_key=effective_key,
+                model=model,
+                max_pages=max_pages,
+            )
+        except Exception as e:
+            # Document is still saved even if LLM extraction hits an error
+            return {
+                "doc_id": doc_id,
+                "doc_name": doc_name,
+                "page_count": page_count,
+                "chunks_extracted": len(chunks),
+                "fact_count": 0,
+                "status": "extraction_error",
+                "message": f"Document parsed but fact extraction failed: {str(e)}",
+            }
+
     return {
         "doc_id": doc_id,
         "doc_name": doc_name,
         "page_count": page_count,
         "chunks_extracted": len(chunks),
-        "chunks": [
-            {
-                "page_number": c.page_number,
-                "text_preview": c.text[:200] + "..." if len(c.text) > 200 else c.text,
-                "text_length": len(c.text),
-            }
-            for c in chunks
-        ],
+        "fact_count": len(facts_extracted),
+        "status": "extracted" if effective_key else "parsed_only",
+        "message": (
+            f"Extracted {len(facts_extracted)} facts."
+            if effective_key
+            else "Document parsed. Pass X-API-Key header to extract facts."
+        ),
+        "facts_preview": [f.model_dump() for f in facts_extracted[:15]],
+    }
+
+
+@app.post("/api/documents/{doc_id}/process")
+async def process_document(
+    doc_id: str,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    model: Optional[str] = Query(None),
+    max_pages: Optional[int] = Query(None),
+):
+    """
+    Extract facts from an existing document using an API key.
+    """
+    import os
+
+    from backend.config import UPLOAD_DIR
+    from backend.fact_extractor import extract_document_facts
+    from backend.pdf_parser import parse_pdf
+
+    doc = await db.get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_path = UPLOAD_DIR / f"{doc_id}.pdf"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Source PDF file not found on server")
+
+    effective_key = x_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not effective_key:
+        raise HTTPException(
+            status_code=400,
+            detail="API key required. Provide via X-API-Key header or set GEMINI_API_KEY.",
+        )
+
+    file_bytes = file_path.read_bytes()
+    chunks = parse_pdf(file_bytes, doc_name=doc["doc_name"], doc_id=doc_id)
+
+    facts = await extract_document_facts(
+        chunks=chunks,
+        doc_id=doc_id,
+        doc_name=doc["doc_name"],
+        db=db,
+        registry=registry,
+        api_key=effective_key,
+        model=model,
+        max_pages=max_pages,
+    )
+
+    return {
+        "doc_id": doc_id,
+        "doc_name": doc["doc_name"],
+        "fact_count": len(facts),
+        "facts": [f.model_dump() for f in facts],
+    }
+
+
+# --- Normalization Registry Inspection ---
+
+
+@app.get("/api/normalization/canonicals")
+async def get_canonicals():
+    """List canonical normalized entities and attributes in the registry."""
+    subjects = await db.get_canonical_values("subject")
+    attributes = await db.get_canonical_values("attribute")
+    return {
+        "subjects": [s["canonical_value"] for s in subjects],
+        "attributes": [a["canonical_value"] for a in attributes],
     }
 
 
