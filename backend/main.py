@@ -183,6 +183,74 @@ async def validate_key(
         )
 
 
+# --- PDF Upload ---
+
+
+@app.post("/api/upload")
+async def upload_pdf(file: UploadFile = File(...)):
+    """
+    Upload a PDF file for processing.
+
+    Parses the PDF into page-level text chunks and stores the document.
+    Returns the document ID and parsed chunks for verification.
+    Later phases will wire fact extraction into this endpoint.
+    """
+    import uuid
+
+    from backend.config import UPLOAD_DIR
+    from backend.pdf_parser import parse_pdf, get_page_count
+
+    # Validate file type
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are accepted.",
+        )
+
+    # Read file content
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file.")
+
+    doc_id = str(uuid.uuid4())
+    doc_name = file.filename
+
+    # Parse PDF into page chunks
+    try:
+        chunks = parse_pdf(file_bytes, doc_name=doc_name, doc_id=doc_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not chunks:
+        raise HTTPException(
+            status_code=400,
+            detail="No extractable text found in the PDF. It may be a scanned document.",
+        )
+
+    # Save the uploaded file
+    save_path = UPLOAD_DIR / f"{doc_id}.pdf"
+    save_path.write_bytes(file_bytes)
+
+    # Store document metadata in DB
+    page_count = get_page_count(file_bytes)
+    await db.insert_document(doc_id, doc_name, page_count)
+
+    return {
+        "doc_id": doc_id,
+        "doc_name": doc_name,
+        "page_count": page_count,
+        "chunks_extracted": len(chunks),
+        "chunks": [
+            {
+                "page_number": c.page_number,
+                "text_preview": c.text[:200] + "..." if len(c.text) > 200 else c.text,
+                "text_length": len(c.text),
+            }
+            for c in chunks
+        ],
+    }
+
+
 # --- Static Frontend ---
 # Mount frontend directory to serve the UI at the root
 _frontend_dir = PROJECT_ROOT / "frontend"
