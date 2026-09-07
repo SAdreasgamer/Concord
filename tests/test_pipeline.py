@@ -514,3 +514,182 @@ async def test_candidate_matcher_hybrid_with_db(tmp_path):
         await db.close()
 
 
+def test_relation_judge_parsing_and_normalization():
+    """Verify parsing and normalization of relation judge LLM responses."""
+    from backend.models import CandidatePair, Fact, MatchSource, ReconcilingFactor, RelationType
+    from backend.relation_judge import (
+        extract_json_from_llm,
+        normalize_reconciling_factor,
+        normalize_relation_type,
+        parse_judgment_dict,
+    )
+
+    f1 = Fact(
+        id="f1",
+        subject="Delhivery",
+        subject_normalized="delhivery",
+        attribute="Revenue",
+        attribute_normalized="revenue",
+        value="2075.54",
+        unit="INR Cr",
+        temporal_scope="Q4_FY24",
+        claim_fingerprint="delhivery::revenue::q4_fy24",
+        source_doc="doc1.pdf",
+        source_doc_id="d1",
+        page=1,
+        evidence_quote="Revenue was 2075.54 Cr",
+    )
+    f2 = Fact(
+        id="f2",
+        subject="Delhivery",
+        subject_normalized="delhivery",
+        attribute="Revenue",
+        attribute_normalized="revenue",
+        value="1850.20",
+        unit="INR Cr",
+        temporal_scope="Q4_FY23",
+        claim_fingerprint="delhivery::revenue::q4_fy23",
+        source_doc="doc2.pdf",
+        source_doc_id="d2",
+        page=3,
+        evidence_quote="Revenue was 1850.20 Cr in Q4 FY23",
+    )
+    pair = CandidatePair(
+        fact_1=f1,
+        fact_2=f2,
+        match_source=MatchSource.STRUCTURAL,
+        match_hint="different_scope",
+        is_intra_document=False,
+    )
+
+    # 1. Test normalization helpers
+    assert normalize_relation_type("CORROBORATION") == RelationType.CORROBORATES
+    assert normalize_relation_type("contradiction") == RelationType.CONTRADICTS
+    assert normalize_relation_type("reconcile") == RelationType.RECONCILED
+
+    assert normalize_reconciling_factor("time_difference", RelationType.RECONCILED) == ReconcilingFactor.TEMPORAL_SCOPE
+    assert normalize_reconciling_factor("unit_scale", RelationType.RECONCILED) == ReconcilingFactor.UNIT_DIFFERENCE
+    assert normalize_reconciling_factor("subsidiary_scope", RelationType.RECONCILED) == ReconcilingFactor.ENTITY_SCOPE
+    assert normalize_reconciling_factor("temporal_scope", RelationType.CORROBORATES) == ReconcilingFactor.NONE
+
+    # 2. Test JSON extraction from markdown fences
+    llm_markdown = """
+    ```json
+    {
+      "relation_type": "reconciled",
+      "reconciling_factor": "temporal_scope",
+      "explanation": "Values differ because Fact 1 describes Q4 FY24 (2075.54 Cr) while Fact 2 describes Q4 FY23 (1850.20 Cr)."
+    }
+    ```
+    """
+    parsed_json = extract_json_from_llm(llm_markdown)
+    relationship = parse_judgment_dict(parsed_json, pair)
+
+    assert relationship.relation_type == RelationType.RECONCILED
+    assert relationship.reconciling_factor == ReconcilingFactor.TEMPORAL_SCOPE
+    assert "Q4 FY24" in relationship.explanation
+    assert relationship.fact_id_1 == "f1"
+    assert relationship.fact_id_2 == "f2"
+
+
+@pytest.mark.asyncio
+async def test_judge_and_store_candidates_db_pipeline(tmp_path):
+    """Verify persisting judged relationships and demo cases in SQLite."""
+    from backend.database import Database
+    from backend.models import CandidatePair, Fact, MatchSource, ReconcilingFactor, RelationType
+
+    test_db_path = tmp_path / "test_rel.db"
+    db = Database(str(test_db_path))
+    await db.connect()
+
+    try:
+        # Insert test facts for the 3 core relationship cases
+        f1 = Fact(
+            id="f-c1",
+            subject="Delhivery",
+            subject_normalized="delhivery",
+            attribute="Revenue",
+            attribute_normalized="revenue",
+            value="2075.54",
+            claim_fingerprint="delhivery::revenue::q4_fy24",
+            source_doc="doc1.pdf",
+            source_doc_id="d1",
+            page=1,
+            evidence_quote="Revenue: 2075.54 Cr",
+        )
+        f2 = Fact(
+            id="f-c2",
+            subject="Delhivery",
+            subject_normalized="delhivery",
+            attribute="Revenue",
+            attribute_normalized="revenue",
+            value="2075",
+            claim_fingerprint="delhivery::revenue::q4_fy24",
+            source_doc="doc2.pdf",
+            source_doc_id="d2",
+            page=2,
+            evidence_quote="Posted 2075 Cr revenue",
+        )
+        f3 = Fact(
+            id="f-c3",
+            subject="Delhivery",
+            subject_normalized="delhivery",
+            attribute="Revenue",
+            attribute_normalized="revenue",
+            value="1850.20",
+            claim_fingerprint="delhivery::revenue::q4_fy23",
+            source_doc="doc1.pdf",
+            source_doc_id="d1",
+            page=1,
+            evidence_quote="Previous year Q4 was 1850.20 Cr",
+        )
+
+        await db.insert_fact(f1.model_dump())
+        await db.insert_fact(f2.model_dump())
+        await db.insert_fact(f3.model_dump())
+
+        # Store Corroboration relationship
+        rel_corr = {
+            "fact_id_1": "f-c1",
+            "fact_id_2": "f-c2",
+            "relation_type": RelationType.CORROBORATES.value,
+            "reconciling_factor": ReconcilingFactor.NONE.value,
+            "explanation": "Both documents state approximately 2,075 Cr revenue for Q4 FY24.",
+            "match_source": MatchSource.STRUCTURAL.value,
+            "is_intra_document": 0,
+        }
+        await db.insert_relationship(rel_corr)
+
+        # Store Reconciled relationship
+        rel_rec = {
+            "fact_id_1": "f-c1",
+            "fact_id_2": "f-c3",
+            "relation_type": RelationType.RECONCILED.value,
+            "reconciling_factor": ReconcilingFactor.TEMPORAL_SCOPE.value,
+            "explanation": "Different values represent different fiscal quarters (Q4 FY24 vs Q4 FY23).",
+            "match_source": MatchSource.STRUCTURAL.value,
+            "is_intra_document": 1,
+        }
+        await db.insert_relationship(rel_rec)
+
+        # Verify DB queries
+        all_rels = await db.get_relationships()
+        assert len(all_rels) == 2
+
+        corr_rels = await db.get_relationships(relation_type="corroborates")
+        assert len(corr_rels) == 1
+        assert corr_rels[0]["fact_id_1"] == "f-c1"
+
+        rec_rels = await db.get_relationships(relation_type="reconciled")
+        assert len(rec_rels) == 1
+        assert rec_rels[0]["reconciling_factor"] == "temporal_scope"
+
+        # Verify relationship_exists check works symmetrically
+        assert await db.relationship_exists("f-c1", "f-c2") is True
+        assert await db.relationship_exists("f-c2", "f-c1") is True
+        assert await db.relationship_exists("f-c2", "f-c3") is False
+    finally:
+        await db.close()
+
+
+

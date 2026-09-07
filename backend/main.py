@@ -17,11 +17,15 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import PROJECT_ROOT
 from backend.database import Database
+from backend.embeddings import EmbeddingService
+from backend.matcher import CandidateMatcher
 from backend.normalization import NormalizationRegistry
 
 # --- Singletons ---
 db = Database()
 registry = NormalizationRegistry(db)
+embedding_service = EmbeddingService()
+matcher = CandidateMatcher(db=db, embedding_service=embedding_service)
 
 
 # --- Lifespan ---
@@ -248,6 +252,7 @@ async def upload_pdf(
     # Check for API key in header or environment
     effective_key = x_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     facts_extracted = []
+    relationships_found = []
 
     if effective_key:
         try:
@@ -261,16 +266,29 @@ async def upload_pdf(
                 model=model,
                 max_pages=max_pages,
             )
+            # Run candidate matching and relation judging across documents
+            if facts_extracted:
+                candidates = await matcher.find_candidates(new_facts=facts_extracted)
+                if candidates:
+                    from backend.relation_judge import judge_and_store_candidates
+
+                    relationships_found = await judge_and_store_candidates(
+                        candidates=candidates,
+                        db=db,
+                        api_key=effective_key,
+                        model=model,
+                    )
         except Exception as e:
-            # Document is still saved even if LLM extraction hits an error
+            # Document is still saved even if LLM processing hits an error
             return {
                 "doc_id": doc_id,
                 "doc_name": doc_name,
                 "page_count": page_count,
                 "chunks_extracted": len(chunks),
                 "fact_count": 0,
+                "relationship_count": 0,
                 "status": "extraction_error",
-                "message": f"Document parsed but fact extraction failed: {str(e)}",
+                "message": f"Document parsed but processing failed: {str(e)}",
             }
 
     return {
@@ -279,13 +297,15 @@ async def upload_pdf(
         "page_count": page_count,
         "chunks_extracted": len(chunks),
         "fact_count": len(facts_extracted),
+        "relationship_count": len(relationships_found),
         "status": "extracted" if effective_key else "parsed_only",
         "message": (
-            f"Extracted {len(facts_extracted)} facts."
+            f"Extracted {len(facts_extracted)} facts and discovered {len(relationships_found)} relationships."
             if effective_key
-            else "Document parsed. Pass X-API-Key header to extract facts."
+            else "Document parsed. Pass X-API-Key header to extract facts and judge relationships."
         ),
         "facts_preview": [f.model_dump() for f in facts_extracted[:15]],
+        "relationships_preview": [r.model_dump() for r in relationships_found[:10]],
     }
 
 
@@ -297,13 +317,14 @@ async def process_document(
     max_pages: Optional[int] = Query(None),
 ):
     """
-    Extract facts from an existing document using an API key.
+    Extract facts and judge relationships from an existing document using an API key.
     """
     import os
 
     from backend.config import UPLOAD_DIR
     from backend.fact_extractor import extract_document_facts
     from backend.pdf_parser import parse_pdf
+    from backend.relation_judge import judge_and_store_candidates
 
     doc = await db.get_document(doc_id)
     if not doc:
@@ -334,11 +355,82 @@ async def process_document(
         max_pages=max_pages,
     )
 
+    relationships = []
+    if facts:
+        candidates = await matcher.find_candidates(new_facts=facts)
+        if candidates:
+            relationships = await judge_and_store_candidates(
+                candidates=candidates,
+                db=db,
+                api_key=effective_key,
+                model=model,
+            )
+
     return {
         "doc_id": doc_id,
         "doc_name": doc["doc_name"],
         "fact_count": len(facts),
+        "relationship_count": len(relationships),
         "facts": [f.model_dump() for f in facts],
+        "relationships": [r.model_dump() for r in relationships],
+    }
+
+
+from pydantic import BaseModel
+
+
+class CompareRequest(BaseModel):
+    fact_id_1: str
+    fact_id_2: str
+
+
+@app.post("/api/relationships/compare")
+async def compare_facts_on_demand(
+    req: CompareRequest,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    model: Optional[str] = Query(None),
+):
+    """
+    Judge relationship between any two specific facts on-demand.
+    """
+    import os
+
+    from backend.models import CandidatePair, Fact, MatchSource
+    from backend.relation_judge import judge_single_pair
+
+    effective_key = x_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not effective_key:
+        raise HTTPException(
+            status_code=400,
+            detail="API key required. Provide via X-API-Key header or set GEMINI_API_KEY.",
+        )
+
+    f1_dict = await db.get_fact(req.fact_id_1)
+    f2_dict = await db.get_fact(req.fact_id_2)
+
+    if not f1_dict or not f2_dict:
+        raise HTTPException(status_code=404, detail="One or both facts not found")
+
+    f1 = Fact(**f1_dict)
+    f2 = Fact(**f2_dict)
+
+    hint = "exact_scope" if f1.claim_fingerprint == f2.claim_fingerprint else "different_scope"
+    pair = CandidatePair(
+        fact_1=f1,
+        fact_2=f2,
+        match_source=MatchSource.STRUCTURAL,
+        match_hint=hint,
+        is_intra_document=(f1.source_doc_id == f2.source_doc_id),
+    )
+
+    relationship = await judge_single_pair(pair=pair, api_key=effective_key, model=model)
+    if not await db.relationship_exists(f1.id, f2.id):
+        await db.insert_relationship(relationship.model_dump())
+
+    return {
+        "relationship": relationship.model_dump(),
+        "fact_1": f1.model_dump(),
+        "fact_2": f2.model_dump(),
     }
 
 

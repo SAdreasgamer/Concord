@@ -139,3 +139,22 @@ Evidence Quote: "{evidence_quote_2}"
 Candidate Match Hint: {match_hint}
 
 Classify their relationship (corroborates, contradicts, or reconciled) and explain your reasoning."""
+
+RELATION_JUDGE_BATCH_USER_PROMPT_TEMPLATE = """Compare the following {count} pairs of candidate facts and judge each relationship.
+
+{pairs_text}
+
+OUTPUT FORMAT:
+Respond with a single JSON object containing a "judgments" array:
+{{
+  "judgments": [
+    {{
+      "pair_index": 1,
+      "relation_type": "corroborates" | "contradicts" | "reconciled",
+      "reconciling_factor": "temporal_scope" | "entity_scope" | "unit_difference" | "definition_difference" | "none",
+      "explanation": "Detailed rationale explaining the judgment with references to the evidence quotes."
+    }}
+  ]
+}}
+"""
+
