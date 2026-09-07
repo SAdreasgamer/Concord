@@ -71,9 +71,35 @@ async def health():
 
 @app.get("/api/documents")
 async def list_documents():
-    """List all processed documents."""
+    """List all processed documents with fact counts."""
     docs = await db.get_documents()
     return {"documents": docs}
+
+
+@app.get("/api/documents/{doc_id}")
+async def get_document(doc_id: str):
+    """Get metadata for a single document."""
+    doc = await db.get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    facts = await db.get_facts(source_doc_id=doc_id)
+    rels = await db.get_relationships_for_document(doc_id)
+    return {
+        "document": {
+            **doc,
+            "fact_count": len(facts),
+            "relationship_count": len(rels),
+        }
+    }
+
+
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str):
+    """Delete a document and cascade delete its facts and relationships."""
+    success = await db.delete_document(doc_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"status": "deleted", "doc_id": doc_id}
 
 
 @app.get("/api/documents/{doc_id}/facts")
@@ -83,7 +109,22 @@ async def get_document_facts(doc_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     facts = await db.get_facts(source_doc_id=doc_id)
-    return {"document": doc, "facts": facts}
+    return {"document": doc, "facts": facts, "count": len(facts)}
+
+
+@app.get("/api/documents/{doc_id}/relationships")
+async def get_document_relationships(doc_id: str):
+    """Get all relationships where at least one fact belongs to this document."""
+    doc = await db.get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    relationships = await db.get_relationships_for_document(doc_id)
+    enriched = []
+    for rel in relationships:
+        f1 = await db.get_fact(rel["fact_id_1"])
+        f2 = await db.get_fact(rel["fact_id_2"])
+        enriched.append({**rel, "fact_1": f1, "fact_2": f2})
+    return {"document": doc, "relationships": enriched, "count": len(enriched)}
 
 
 # --- Fact Endpoints ---
@@ -92,11 +133,34 @@ async def get_document_facts(doc_id: str):
 @app.get("/api/facts")
 async def list_facts(
     source_doc_id: Optional[str] = Query(None),
+    subject_normalized: Optional[str] = Query(None),
+    attribute_normalized: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
     limit: int = Query(500, ge=1, le=2000),
 ):
-    """List all facts, optionally filtered by document."""
-    facts = await db.get_facts(source_doc_id=source_doc_id, limit=limit)
-    return {"facts": facts, "count": len(facts)}
+    """List all facts, with optional filters by document, entity, attribute, or search query."""
+    all_facts = await db.get_facts(source_doc_id=source_doc_id, limit=limit)
+
+    # In-memory filtering for fine-grained criteria
+    filtered = all_facts
+    if subject_normalized:
+        s_norm = subject_normalized.strip().lower()
+        filtered = [f for f in filtered if f["subject_normalized"] == s_norm]
+    if attribute_normalized:
+        a_norm = attribute_normalized.strip().lower()
+        filtered = [f for f in filtered if f["attribute_normalized"] == a_norm]
+    if search:
+        q = search.strip().lower()
+        filtered = [
+            f
+            for f in filtered
+            if q in f["subject"].lower()
+            or q in f["attribute"].lower()
+            or q in f["value"].lower()
+            or q in f["evidence_quote"].lower()
+        ]
+
+    return {"facts": filtered, "count": len(filtered)}
 
 
 @app.get("/api/facts/{fact_id}")
@@ -129,18 +193,42 @@ async def get_fact_detail(fact_id: str):
     }
 
 
+@app.get("/api/facts/{fact_id}/related")
+async def get_fact_related(fact_id: str):
+    """Get all relationships for a specific fact, enriched with counterpart fact data."""
+    fact = await db.get_fact(fact_id)
+    if not fact:
+        raise HTTPException(status_code=404, detail="Fact not found")
+
+    relationships = await db.get_relationships_for_fact(fact_id)
+    enriched = []
+    for rel in relationships:
+        counterpart_id = rel["fact_id_2"] if rel["fact_id_1"] == fact_id else rel["fact_id_1"]
+        counterpart = await db.get_fact(counterpart_id)
+        enriched.append({
+            **rel,
+            "target_fact": counterpart,
+        })
+    return {"fact_id": fact_id, "relationships": enriched, "count": len(enriched)}
+
+
 # --- Relationship Endpoints ---
 
 
 @app.get("/api/relationships")
 async def list_relationships(
     relation_type: Optional[str] = Query(None),
+    is_intra_document: Optional[bool] = Query(None),
     limit: int = Query(500, ge=1, le=2000),
 ):
-    """List all relationships, optionally filtered by type."""
+    """List all relationships, optionally filtered by type or intra-document scope."""
     relationships = await db.get_relationships(
         relation_type=relation_type, limit=limit
     )
+
+    if is_intra_document is not None:
+        target_val = 1 if is_intra_document else 0
+        relationships = [r for r in relationships if r.get("is_intra_document") == target_val]
 
     # Enrich with fact data
     enriched = []
@@ -150,6 +238,42 @@ async def list_relationships(
         enriched.append({**rel, "fact_1": fact_1, "fact_2": fact_2})
 
     return {"relationships": enriched, "count": len(enriched)}
+
+
+@app.get("/api/relationships/{rel_id}")
+async def get_relationship_detail(rel_id: str):
+    """Get a single relationship by ID with enriched fact details."""
+    rel = await db.get_relationship(rel_id)
+    if not rel:
+        raise HTTPException(status_code=404, detail="Relationship not found")
+    f1 = await db.get_fact(rel["fact_id_1"])
+    f2 = await db.get_fact(rel["fact_id_2"])
+    return {**rel, "fact_1": f1, "fact_2": f2}
+
+
+# --- Export Endpoint ---
+
+
+@app.get("/api/export")
+async def export_data():
+    """Export complete fact knowledge layer (documents, facts, relationships)."""
+    docs = await db.get_documents()
+    facts = await db.get_facts(limit=10000)
+    rels = await db.get_relationships(limit=10000)
+    stats = await db.get_stats()
+
+    # Clean embeddings from export
+    cleaned_facts = [{k: v for k, v in f.items() if k != "embedding"} for f in facts]
+
+    return {
+        "export_metadata": {
+            "version": "0.1.0",
+            "stats": stats,
+        },
+        "documents": docs,
+        "facts": cleaned_facts,
+        "relationships": rels,
+    }
 
 
 # --- Key Validation ---

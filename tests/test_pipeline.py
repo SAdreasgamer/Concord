@@ -692,4 +692,90 @@ async def test_judge_and_store_candidates_db_pipeline(tmp_path):
         await db.close()
 
 
+def test_rest_api_endpoints_comprehensive():
+    """Verify all REST API endpoints using FastAPI TestClient."""
+    from fastapi.testclient import TestClient
+    from backend.main import app
+
+    with TestClient(app) as client:
+        # 1. Health check
+        r = client.get("/health")
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+        # 2. Upload a test PDF
+        from backend.config import PROJECT_ROOT
+        pdf_path = (
+            PROJECT_ROOT
+            / "starter-datasets"
+            / "delhivery"
+            / "03-delhivery-q4-fy24-earnings-presentation.pdf"
+        )
+        with open(pdf_path, "rb") as f:
+            upload_resp = client.post("/api/upload", files={"file": ("delhivery_q4.pdf", f, "application/pdf")})
+        assert upload_resp.status_code == 200
+        doc_data = upload_resp.json()
+        doc_id = doc_data["doc_id"]
+        assert doc_data["chunks_extracted"] == 27
+        assert doc_data["status"] == "parsed_only"
+
+        # 3. Documents list
+        r = client.get("/api/documents")
+        assert r.status_code == 200
+        docs = r.json()["documents"]
+        assert any(d["doc_id"] == doc_id for d in docs)
+
+        # 4. Single document metadata
+        r = client.get(f"/api/documents/{doc_id}")
+        assert r.status_code == 200
+        assert r.json()["document"]["doc_id"] == doc_id
+        assert "fact_count" in r.json()["document"]
+
+        # 5. Document facts
+        r = client.get(f"/api/documents/{doc_id}/facts")
+        assert r.status_code == 200
+        assert "facts" in r.json()
+
+        # 6. Document relationships
+        r = client.get(f"/api/documents/{doc_id}/relationships")
+        assert r.status_code == 200
+        assert "relationships" in r.json()
+
+        # 7. Facts endpoint with filtering
+        r = client.get("/api/facts", params={"limit": 50})
+        assert r.status_code == 200
+
+        r = client.get("/api/facts", params={"search": "delhivery"})
+        assert r.status_code == 200
+
+        # 8. Relationships endpoint with filtering
+        r = client.get("/api/relationships", params={"relation_type": "corroborates"})
+        assert r.status_code == 200
+
+        # 9. Normalization canonicals
+        r = client.get("/api/normalization/canonicals")
+        assert r.status_code == 200
+        assert "subjects" in r.json()
+        assert "attributes" in r.json()
+
+        # 10. Export endpoint
+        r = client.get("/api/export")
+        assert r.status_code == 200
+        export_data = r.json()
+        assert "export_metadata" in export_data
+        assert "documents" in export_data
+        assert "facts" in export_data
+        assert "relationships" in export_data
+
+        # 11. Delete document
+        r = client.delete(f"/api/documents/{doc_id}")
+        assert r.status_code == 200
+        assert r.json()["status"] == "deleted"
+
+        # Verify 404 after delete
+        r = client.get(f"/api/documents/{doc_id}")
+        assert r.status_code == 404
+
+
+
 

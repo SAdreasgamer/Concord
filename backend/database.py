@@ -148,6 +148,27 @@ class Database:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def delete_document(self, doc_id: str) -> bool:
+        """Delete a document and cascade delete its facts and relationships."""
+        doc = await self.get_document(doc_id)
+        if not doc:
+            return False
+
+        # 1. Delete relationships referencing facts from this document
+        await self.db.execute(
+            "DELETE FROM relationships WHERE fact_id_1 IN (SELECT id FROM facts WHERE source_doc_id = ?) "
+            "   OR fact_id_2 IN (SELECT id FROM facts WHERE source_doc_id = ?)",
+            (doc_id, doc_id),
+        )
+
+        # 2. Delete facts from this document
+        await self.db.execute("DELETE FROM facts WHERE source_doc_id = ?", (doc_id,))
+
+        # 3. Delete document record
+        await self.db.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
+        await self.db.commit()
+        return True
+
     # --- Facts ---
 
     async def insert_fact(self, fact: dict, embedding: Optional[bytes] = None) -> str:
@@ -294,6 +315,26 @@ class Database:
             "WHERE fact_id_1 = ? OR fact_id_2 = ? "
             "ORDER BY created_at DESC",
             (fact_id, fact_id),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_relationship(self, rel_id: str) -> Optional[dict]:
+        """Fetch a single relationship by ID."""
+        cursor = await self.db.execute(
+            "SELECT * FROM relationships WHERE id = ?", (rel_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_relationships_for_document(self, doc_id: str) -> list[dict]:
+        """Get all relationships where at least one fact belongs to this document."""
+        cursor = await self.db.execute(
+            "SELECT r.* FROM relationships r "
+            "WHERE r.fact_id_1 IN (SELECT id FROM facts WHERE source_doc_id = ?) "
+            "   OR r.fact_id_2 IN (SELECT id FROM facts WHERE source_doc_id = ?) "
+            "ORDER BY r.created_at DESC",
+            (doc_id, doc_id),
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
