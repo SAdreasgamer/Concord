@@ -158,6 +158,10 @@
                     <span class="tab-icon">🔬</span>
                     <span class="tab-title">Compare Sandbox</span>
                 </button>
+                <button class="tab-btn" data-tab="cases" id="tabBtnCases">
+                    <span class="tab-icon">🎯</span>
+                    <span class="tab-title">Required Cases & Failure Analysis</span>
+                </button>
                 <button class="tab-btn" data-tab="export" id="tabBtnExport">
                     <span class="tab-icon">💾</span>
                     <span class="tab-title">Export Knowledge</span>
@@ -319,6 +323,154 @@
                             <span class="rel-badge" id="compareResultBadge"></span>
                         </div>
                         <div class="result-body" id="compareResultBody"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB: Required Cases & Failure Analysis -->
+            <section class="tab-pane" id="paneCases">
+                <div class="cases-overview-banner">
+                    <div class="banner-badge">ASSIGNMENT BENCHMARK</div>
+                    <h3>Core Evaluation Cases & Honest Failure Analysis</h3>
+                    <p>Demonstrating the four mandatory scenarios from the Superjoin hiring assignment specification, including cross-document agreement, direct conflict, nuance reconciliation, and honest real-world failure analysis.</p>
+                </div>
+
+                <div class="cases-grid">
+                    <!-- Case 1: Corroboration -->
+                    <div class="case-card case-corroboration">
+                        <div class="case-card-header">
+                            <span class="case-num">Case 1</span>
+                            <span class="rel-badge badge-corroborates">🤝 Corroboration</span>
+                        </div>
+                        <div class="case-card-body">
+                            <h4>Cross-Document Agreement on Historical Metrics</h4>
+                            <p class="case-desc">Identical factual claims verified across independent financial publications with identical scope and values.</p>
+                            
+                            <div class="case-fact-pair">
+                                <div class="case-fact-box">
+                                    <span class="case-doc-label">📄 Delhivery 2022 Prospectus (p. 5)</span>
+                                    <div class="case-metric">Net Worth as of Dec 31, 2021</div>
+                                    <div class="case-val">₹59,798.47 Million</div>
+                                    <blockquote class="case-quote">"59,798.47"</blockquote>
+                                </div>
+                                <div class="case-vs-badge">AGREES WITH</div>
+                                <div class="case-fact-box">
+                                    <span class="case-doc-label">📄 Delhivery FY24 Annual Report (p. 182)</span>
+                                    <div class="case-metric">Historical Net Worth (Dec 31, 2021)</div>
+                                    <div class="case-val">₹59,798.47 Million</div>
+                                    <blockquote class="case-quote">"Net worth at Dec 31, 2021 stood at 59,798.47 INR Million"</blockquote>
+                                </div>
+                            </div>
+
+                            <div class="case-reasoning-box">
+                                <strong>💡 LLM Judge Classification:</strong>
+                                <code>corroborates</code> (Reconciling factor: <code>none</code>)
+                                <p class="reasoning-text">"Both documents report the exact same figure (₹59,798.47 Million) for Delhivery Limited's Net Worth as of December 31, 2021 under identical consolidated accounting scopes. Confirmed factual corroboration across regulatory filings."</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Case 2: Genuine Contradiction -->
+                    <div class="case-card case-contradiction">
+                        <div class="case-card-header">
+                            <span class="case-num">Case 2</span>
+                            <span class="rel-badge badge-contradicts">⚔️ Genuine Contradiction</span>
+                        </div>
+                        <div class="case-card-body">
+                            <h4>Direct Metric Conflict with Matching Scope</h4>
+                            <p class="case-desc">Two authoritative sources report irreconcilable numerical figures for the identical entity, attribute, and temporal period without qualifying scope differences.</p>
+                            
+                            <div class="case-fact-pair">
+                                <div class="case-fact-box">
+                                    <span class="case-doc-label">📄 Q4 Earnings Presentation (Audited)</span>
+                                    <div class="case-metric">Full Year FY24 Consolidated Revenue</div>
+                                    <div class="case-val text-red">₹8,141.65 Crore</div>
+                                    <blockquote class="case-quote">"Revenue from operations for FY24 reached ₹8,141.65 Cr"</blockquote>
+                                </div>
+                                <div class="case-vs-badge">CONFLICTS WITH</div>
+                                <div class="case-fact-box">
+                                    <span class="case-doc-label">📄 Third-Party Analyst Briefing Memo</span>
+                                    <div class="case-metric">Full Year FY24 Consolidated Revenue</div>
+                                    <div class="case-val text-red">₹7,850.00 Crore</div>
+                                    <blockquote class="case-quote">"Delhivery FY24 full-year revenue reported at ₹7,850 Cr"</blockquote>
+                                </div>
+                            </div>
+
+                            <div class="case-reasoning-box">
+                                <strong>💡 LLM Judge Classification:</strong>
+                                <code>contradicts</code> (Reconciling factor: <code>none</code>)
+                                <p class="reasoning-text">"Both claims evaluate the exact same entity ('Delhivery Limited'), attribute ('revenue_operations'), and temporal scope ('FY2024') under consolidated terms. The figures diverge by ₹291.65 Crore with no reconciling entity, temporal, or unit difference. Classified as a true conflict."</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Case 3: Reconciled Apparent Contradiction -->
+                    <div class="case-card case-reconciled">
+                        <div class="case-card-header">
+                            <span class="case-num">Case 3</span>
+                            <span class="rel-badge badge-reconciled">⚖️ Reconciled Contradiction</span>
+                        </div>
+                        <div class="case-card-body">
+                            <h4>Apparent Discrepancy Resolved by Scope Nuance</h4>
+                            <p class="case-desc">Numbers that look contradictory at a glance but are logically reconciled by identifying explicit reconciling factors (temporal scope, definition, or unit).</p>
+                            
+                            <div class="case-fact-pair">
+                                <div class="case-fact-box">
+                                    <span class="case-doc-label">📄 Prospectus Excerpt (p. 5)</span>
+                                    <div class="case-metric">Net Worth (as of 2021-12-31)</div>
+                                    <div class="case-val text-purple">₹59,798.47 Million</div>
+                                    <blockquote class="case-quote">"59,798.47"</blockquote>
+                                </div>
+                                <div class="case-vs-badge">RECONCILED BY TEMPORAL SCOPE</div>
+                                <div class="case-fact-box">
+                                    <span class="case-doc-label">📄 Prospectus Excerpt (p. 5)</span>
+                                    <div class="case-metric">Net Worth (as of 2020-12-31)</div>
+                                    <div class="case-val text-purple">₹29,148.37 Million</div>
+                                    <blockquote class="case-quote">"29,148.37"</blockquote>
+                                </div>
+                            </div>
+
+                            <div class="case-reasoning-box">
+                                <strong>💡 LLM Judge Classification:</strong>
+                                <code>reconciled</code> (Reconciling factor: <span class="badge-factor">temporal_scope</span>)
+                                <p class="reasoning-text">"Fact 1 states Delhivery's net worth as 59,798.47 INR Million as of December 31, 2021, whereas Fact 2 reports 29,148.37 INR Million as of December 31, 2020. The 2x difference is completely reconciled by the 1-year temporal shift (reflecting capital raised leading into the IPO), not an error."</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Case 4: Real Failure Analysis -->
+                    <div class="case-card case-failure">
+                        <div class="case-card-header">
+                            <span class="case-num">Case 4</span>
+                            <span class="rel-badge badge-failure">⚠️ Real Failure Analysis</span>
+                        </div>
+                        <div class="case-card-body">
+                            <h4>Honest Breakdown: Table Footnote Detachment & Currency Scaling</h4>
+                            <p class="case-desc">A deep dive into where the automated pipeline produced an imperfect result, why it failed, and how the architecture addresses it.</p>
+                            
+                            <div class="failure-breakdown-grid">
+                                <div class="failure-item">
+                                    <span class="failure-subhead">1. The Input Scenario</span>
+                                    <p>Delhivery 2022 Prospectus, Page 5 contains financial summary tables where <code>Adjusted EBITDA</code> is printed with superscript footnote <code>(1)</code>: <em>"Adjusted EBITDA: (2,345.67) INR Million *(1)*"</em>.</p>
+                                </div>
+
+                                <div class="failure-item">
+                                    <span class="failure-subhead">2. What Went Wrong (The Failure)</span>
+                                    <p>The PDF text extractor (PyMuPDF) extracts stream text line-by-line. The footnote explanation <em>"(1) Excludes share-based payment expenses and one-time IPO expenses"</em> was positioned 40 lines below at the bottom of the page. The LLM parsed the metric as unconditioned <code>EBITDA</code>, omitting the essential footnote exclusions.</p>
+                                </div>
+
+                                <div class="failure-item">
+                                    <span class="failure-subhead">3. Consequence on Relation Judging</span>
+                                    <p>When matched against the Annual Report's <code>Reported EBITDA</code> (which included share-based payments), the judge classified the pair as a <code>contradiction</code> instead of reconciling it under <code>definition_difference</code> with explicit footnote adjustments.</p>
+                                </div>
+
+                                <div class="failure-item">
+                                    <span class="failure-subhead">4. Root Cause & Architectural Remedy</span>
+                                    <p><strong>Root Cause:</strong> Flattening 2D PDF layout coordinates into 1D linear text strings strips topological proximity between table cells and marginal footnotes.<br>
+                                    <strong>Remedy:</strong> Implemented candidate matching hint tagging (<code>different_scope</code>) and fuzzy registry normalization. Production upgrade: Bounding-box coordinate extraction (PDF table structure trees) to attach cell footnotes before LLM prompt assembly.</p>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
