@@ -7,7 +7,7 @@ services:
       - ./uploads:/app/uploads
       - concord-db:/app/data
     environment:
-      - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL:-gemini/gemini-2.0-flash}
+      - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL:-gemini/gemini-3.6-flash}
       - DB_PATH=/app/data/concord.db
     restart: unless-stopped
 

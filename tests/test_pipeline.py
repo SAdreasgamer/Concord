@@ -692,10 +692,12 @@ async def test_judge_and_store_candidates_db_pipeline(tmp_path):
         await db.close()
 
 
-def test_rest_api_endpoints_comprehensive():
+def test_rest_api_endpoints_comprehensive(monkeypatch):
     """Verify all REST API endpoints using FastAPI TestClient."""
     from fastapi.testclient import TestClient
     from backend.main import app
+
+    monkeypatch.setattr("backend.main.get_effective_key", lambda *args, **kwargs: None)
 
     with TestClient(app) as client:
         # 1. Health check

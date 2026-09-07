@@ -6,6 +6,7 @@ FastAPI application entry point. Serves the REST API and static frontend.
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -279,23 +280,43 @@ async def export_data():
 # --- Key Validation ---
 
 
+def get_effective_key(header_key: Optional[str] = None) -> Optional[str]:
+    """Retrieve API key from request header or reload dynamically from .env file."""
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+    if header_key and header_key.strip():
+        return header_key.strip()
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+
 @app.post("/api/validate-key")
 async def validate_key(
-    x_api_key: str = Header(..., alias="X-API-Key"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     model: Optional[str] = Query(None),
 ):
-    """Validate an LLM API key with a lightweight test call."""
+    """Validate an LLM API key with a lightweight test call (supports X-API-Key header or .env)."""
     import litellm
 
     from backend.config import DEFAULT_LLM_MODEL
 
     test_model = model or DEFAULT_LLM_MODEL
+    key_to_test = get_effective_key(x_api_key)
+
+    if not key_to_test:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "valid": False,
+                "message": "No API key provided. Paste it in the UI or in the .env file.",
+                "model": test_model,
+            },
+        )
 
     try:
         response = litellm.completion(
             model=test_model,
             messages=[{"role": "user", "content": "Reply with exactly: ok"}],
-            api_key=x_api_key,
+            api_key=key_to_test,
             max_tokens=5,
         )
         return {
@@ -312,6 +333,157 @@ async def validate_key(
                 "model": test_model,
             },
         )
+
+
+# --- Sample Datasets (One-Click Testing) ---
+
+SAMPLE_DATASETS = {
+    "delhivery_q4": {
+        "title": "Delhivery Q4 FY24 Earnings",
+        "category": "Earnings Presentation",
+        "filename": "03-delhivery-q4-fy24-earnings-presentation.pdf",
+        "rel_path": "starter-datasets/delhivery/03-delhivery-q4-fy24-earnings-presentation.pdf",
+    },
+    "delhivery_prospectus": {
+        "title": "Delhivery Prospectus 2022",
+        "category": "IPO Prospectus Excerpt",
+        "filename": "01-delhivery-prospectus-2022-excerpt.pdf",
+        "rel_path": "starter-datasets/delhivery/01-delhivery-prospectus-2022-excerpt.pdf",
+    },
+    "delhivery_annual": {
+        "title": "Delhivery Annual Report FY24",
+        "category": "Annual Report Excerpt",
+        "filename": "02-delhivery-annual-report-fy24-excerpt.pdf",
+        "rel_path": "starter-datasets/delhivery/02-delhivery-annual-report-fy24-excerpt.pdf",
+    },
+    "economic_survey": {
+        "title": "India Economic Survey 2024-25",
+        "category": "Macroeconomy Excerpt",
+        "filename": "01-india-economic-survey-2024-25-excerpt.pdf",
+        "rel_path": "starter-datasets/india-macroeconomy/01-india-economic-survey-2024-25-excerpt.pdf",
+    },
+    "rbi_annual": {
+        "title": "RBI Annual Report 2024-25",
+        "category": "Central Bank Report",
+        "filename": "02-rbi-annual-report-2024-25-excerpt.pdf",
+        "rel_path": "starter-datasets/india-macroeconomy/02-rbi-annual-report-2024-25-excerpt.pdf",
+    },
+}
+
+
+@app.get("/api/sample-datasets")
+async def list_sample_datasets():
+    """List bundled starter datasets available for instant one-click ingestion."""
+    return {
+        "samples": [
+            {
+                "key": k,
+                "title": v["title"],
+                "category": v["category"],
+                "filename": v["filename"],
+            }
+            for k, v in SAMPLE_DATASETS.items()
+        ]
+    }
+
+
+@app.post("/api/sample-datasets/{dataset_key}/load")
+async def load_sample_dataset(
+    dataset_key: str,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    model: Optional[str] = Query(None),
+    max_pages: Optional[int] = Query(None),
+):
+    """
+    Load and process a bundled starter dataset with a single click.
+    """
+    import os
+    import uuid
+
+    from backend.config import PROJECT_ROOT, UPLOAD_DIR
+    from backend.fact_extractor import extract_document_facts
+    from backend.pdf_parser import get_page_count, parse_pdf
+
+    sample = SAMPLE_DATASETS.get(dataset_key)
+    if not sample:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sample dataset '{dataset_key}' not found. Available: {list(SAMPLE_DATASETS.keys())}",
+        )
+
+    file_path = PROJECT_ROOT / sample["rel_path"]
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Sample PDF file missing on disk")
+
+    file_bytes = file_path.read_bytes()
+    doc_id = str(uuid.uuid4())
+    doc_name = sample["filename"]
+
+    chunks = parse_pdf(file_bytes, doc_name=doc_name, doc_id=doc_id)
+    page_count = get_page_count(file_bytes)
+
+    # Save to uploads
+    save_path = UPLOAD_DIR / f"{doc_id}.pdf"
+    save_path.write_bytes(file_bytes)
+
+    # Insert document
+    await db.insert_document(doc_id, doc_name, page_count)
+
+    effective_key = get_effective_key(x_api_key)
+    facts_extracted = []
+    relationships_found = []
+
+    if effective_key:
+        try:
+            facts_extracted = await extract_document_facts(
+                chunks=chunks,
+                doc_id=doc_id,
+                doc_name=doc_name,
+                db=db,
+                registry=registry,
+                api_key=effective_key,
+                model=model,
+                max_pages=max_pages,
+            )
+            if facts_extracted:
+                candidates = await matcher.find_candidates(new_facts=facts_extracted)
+                if candidates:
+                    from backend.relation_judge import judge_and_store_candidates
+
+                    relationships_found = await judge_and_store_candidates(
+                        candidates=candidates,
+                        db=db,
+                        api_key=effective_key,
+                        model=model,
+                    )
+        except Exception as e:
+            return {
+                "doc_id": doc_id,
+                "doc_name": doc_name,
+                "page_count": page_count,
+                "chunks_extracted": len(chunks),
+                "fact_count": 0,
+                "relationship_count": 0,
+                "status": "extraction_error",
+                "message": f"Sample document parsed, but processing encountered: {str(e)}",
+            }
+
+    return {
+        "doc_id": doc_id,
+        "doc_name": doc_name,
+        "page_count": page_count,
+        "chunks_extracted": len(chunks),
+        "fact_count": len(facts_extracted),
+        "relationship_count": len(relationships_found),
+        "status": "extracted" if effective_key else "parsed_only",
+        "message": (
+            f"Extracted {len(facts_extracted)} facts and discovered {len(relationships_found)} relationships."
+            if effective_key
+            else "Sample PDF parsed successfully. Provide API key to extract facts."
+        ),
+        "facts_preview": [f.model_dump() for f in facts_extracted[:15]],
+        "relationships_preview": [r.model_dump() for r in relationships_found[:10]],
+    }
 
 
 # --- PDF Upload & Processing ---
@@ -374,7 +546,7 @@ async def upload_pdf(
     await db.insert_document(doc_id, doc_name, page_count)
 
     # Check for API key in header or environment
-    effective_key = x_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    effective_key = get_effective_key(x_api_key)
     facts_extracted = []
     relationships_found = []
 
@@ -458,7 +630,7 @@ async def process_document(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Source PDF file not found on server")
 
-    effective_key = x_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    effective_key = get_effective_key(x_api_key)
     if not effective_key:
         raise HTTPException(
             status_code=400,
@@ -522,7 +694,7 @@ async def compare_facts_on_demand(
     from backend.models import CandidatePair, Fact, MatchSource
     from backend.relation_judge import judge_single_pair
 
-    effective_key = x_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    effective_key = get_effective_key(x_api_key)
     if not effective_key:
         raise HTTPException(
             status_code=400,

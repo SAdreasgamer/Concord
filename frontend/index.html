@@ -4,17 +4,440 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Concord — Fact Knowledge Layer</title>
-    <meta name="description" content="Extract, ground, and compare facts across PDF documents.">
+    <meta name="description" content="AI Fact Knowledge Layer for financial and document analysis. Ingest PDFs, extract verifiable facts with verbatim evidence, and discover cross-document corroboration, contradiction, and reconciliation.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-    <header>
-        <h1>Concord</h1>
-        <p>Fact Knowledge Layer</p>
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+        <div class="header-brand">
+            <div class="brand-logo">
+                <span class="logo-icon">⚖️</span>
+            </div>
+            <div class="brand-titles">
+                <div class="brand-name-row">
+                    <h1 class="brand-name">Concord</h1>
+                    <span class="brand-badge">Fact Knowledge Layer</span>
+                </div>
+                <p class="brand-tagline">Cross-Document Grounded Truth & Reconciliation</p>
+            </div>
+        </div>
+
+        <div class="header-controls">
+            <div class="server-status" id="serverStatusBadge">
+                <span class="status-dot"></span>
+                <span class="status-text" id="serverStatusText">Connecting...</span>
+            </div>
+
+            <div class="model-picker-wrap">
+                <select id="modelSelect" class="form-select" title="Select LLM Model">
+                    <option value="gemini/gemini-3.6-flash" selected>Gemini 3.6 Flash (Fast & Structured)</option>
+                    <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                    <option value="gpt-4o">GPT-4o</option>
+                </select>
+            </div>
+
+            <div class="api-key-box">
+                <div class="input-with-icon">
+                    <input type="password" id="apiKeyInput" class="form-input" placeholder="Paste Gemini API Key..." autocomplete="off">
+                    <button type="button" id="toggleKeyVisibility" class="icon-btn" title="Show/Hide API Key">👁️</button>
+                </div>
+                <button type="button" id="validateKeyBtn" class="btn btn-primary btn-sm">
+                    <span class="btn-text">Validate Key</span>
+                </button>
+                <span id="keyStatusBadge" class="key-status-indicator"></span>
+            </div>
+        </div>
     </header>
-    <main>
-        <p>UI coming soon — API is live at <code>/health</code></p>
-    </main>
+
+    <!-- Main Container -->
+    <div class="app-container">
+        <!-- Hero Metrics Strip -->
+        <section class="metrics-strip">
+            <div class="metric-card" id="cardMetricDocs">
+                <div class="metric-icon">📄</div>
+                <div class="metric-body">
+                    <span class="metric-label">Ingested Documents</span>
+                    <span class="metric-value" id="statDocsCount">0</span>
+                </div>
+            </div>
+            <div class="metric-card" id="cardMetricFacts">
+                <div class="metric-icon">🔍</div>
+                <div class="metric-body">
+                    <span class="metric-label">Grounded Facts</span>
+                    <span class="metric-value" id="statFactsCount">0</span>
+                </div>
+            </div>
+            <div class="metric-card metric-corroborates" id="cardMetricCorroborates">
+                <div class="metric-icon">🤝</div>
+                <div class="metric-body">
+                    <span class="metric-label">Corroborations</span>
+                    <span class="metric-value" id="statCorroboratesCount">0</span>
+                </div>
+            </div>
+            <div class="metric-card metric-contradicts" id="cardMetricContradicts">
+                <div class="metric-icon">⚔️</div>
+                <div class="metric-body">
+                    <span class="metric-label">Contradictions</span>
+                    <span class="metric-value" id="statContradictsCount">0</span>
+                </div>
+            </div>
+            <div class="metric-card metric-reconciled" id="cardMetricReconciled">
+                <div class="metric-icon">⚖️</div>
+                <div class="metric-body">
+                    <span class="metric-label">Reconciled</span>
+                    <span class="metric-value" id="statReconciledCount">0</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Ingestion Section -->
+        <section class="ingestion-section">
+            <div class="dropzone" id="dropzone">
+                <input type="file" id="fileInput" accept=".pdf" class="file-input-hidden">
+                <div class="dropzone-content">
+                    <div class="upload-icon-anim">📥</div>
+                    <h3>Drop PDF Here or <span class="browse-link">Browse Local Files</span></h3>
+                    <p class="dropzone-sub">Extracts page-level text, parses tables, resolves entities, and discovers cross-document links</p>
+                    <div class="upload-options">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="limitPagesCheck" checked>
+                            <span>Quick mode (process first 8 pages for fast turnaround)</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Instant Starter Datasets Panel -->
+            <div class="starter-datasets-panel">
+                <div class="panel-header">
+                    <h4>⚡ Quick-Load Starter Datasets (One-Click Ingestion)</h4>
+                    <span class="panel-subtitle">Instant evaluation of the 4 core cases with pre-bundled documents</span>
+                </div>
+                <div class="sample-chips-row" id="sampleDatasetsRow">
+                    <button class="sample-btn" data-sample="delhivery_q4">
+                        <span class="sample-icon">📊</span>
+                        <span class="sample-text">
+                            <strong>Delhivery Q4 FY24</strong>
+                            <small>Earnings Presentation</small>
+                        </span>
+                    </button>
+                    <button class="sample-btn" data-sample="delhivery_annual">
+                        <span class="sample-icon">📑</span>
+                        <span class="sample-text">
+                            <strong>Delhivery FY24 Annual Report</strong>
+                            <small>Financial Tables & Scope</small>
+                        </span>
+                    </button>
+                    <button class="sample-btn" data-sample="delhivery_prospectus">
+                        <span class="sample-icon">📜</span>
+                        <span class="sample-text">
+                            <strong>Delhivery 2022 Prospectus</strong>
+                            <small>IPO Historical Baseline</small>
+                        </span>
+                    </button>
+                    <button class="sample-btn" data-sample="economic_survey">
+                        <span class="sample-icon">📈</span>
+                        <span class="sample-text">
+                            <strong>India Economic Survey</strong>
+                            <small>2024-25 Macro Stats</small>
+                        </span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Progress Card (Dynamic during processing) -->
+            <div class="processing-card hidden" id="processingCard">
+                <div class="processing-header">
+                    <div class="spinner"></div>
+                    <div class="processing-title-group">
+                        <h4 id="processingTitle">Processing Document...</h4>
+                        <p id="processingDetail">Extracting text and grounding facts...</p>
+                    </div>
+                </div>
+                <div class="progress-bar-wrap">
+                    <div class="progress-bar-fill" id="progressBarFill"></div>
+                </div>
+                <div class="pipeline-steps">
+                    <span class="step-badge active" id="stepParse">1. PDF Parsing</span>
+                    <span class="step-badge" id="stepExtract">2. LLM Fact Extraction</span>
+                    <span class="step-badge" id="stepMatch">3. Hybrid Candidate Matching</span>
+                    <span class="step-badge" id="stepJudge">4. Relation Judging</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Workspace Tabs -->
+        <main class="workspace-card">
+            <nav class="tabs-nav" role="tablist">
+                <button class="tab-btn active" data-tab="relationships" id="tabBtnRelationships">
+                    <span class="tab-icon">🌐</span>
+                    <span class="tab-title">Relationships Graph</span>
+                    <span class="tab-count-badge" id="tabRelCount">0</span>
+                </button>
+                <button class="tab-btn" data-tab="facts" id="tabBtnFacts">
+                    <span class="tab-icon">📋</span>
+                    <span class="tab-title">Grounded Facts</span>
+                    <span class="tab-count-badge" id="tabFactsCount">0</span>
+                </button>
+                <button class="tab-btn" data-tab="documents" id="tabBtnDocuments">
+                    <span class="tab-icon">📁</span>
+                    <span class="tab-title">Documents</span>
+                    <span class="tab-count-badge" id="tabDocsCount">0</span>
+                </button>
+                <button class="tab-btn" data-tab="canonicals" id="tabBtnCanonicals">
+                    <span class="tab-icon">🧩</span>
+                    <span class="tab-title">Entity Resolution</span>
+                </button>
+                <button class="tab-btn" data-tab="compare" id="tabBtnCompare">
+                    <span class="tab-icon">🔬</span>
+                    <span class="tab-title">Compare Sandbox</span>
+                </button>
+                <button class="tab-btn" data-tab="export" id="tabBtnExport">
+                    <span class="tab-icon">💾</span>
+                    <span class="tab-title">Export Knowledge</span>
+                </button>
+            </nav>
+
+            <!-- TAB 1: Relationships View -->
+            <section class="tab-pane active" id="paneRelationships">
+                <div class="toolbar">
+                    <div class="filter-group">
+                        <button class="filter-pill active" data-filter="all">All (<span id="countRelAll">0</span>)</button>
+                        <button class="filter-pill pill-corroborates" data-filter="corroborates">🤝 Corroborates (<span id="countRelCorr">0</span>)</button>
+                        <button class="filter-pill pill-contradicts" data-filter="contradicts">⚔️ Contradicts (<span id="countRelCont">0</span>)</button>
+                        <button class="filter-pill pill-reconciled" data-filter="reconciled">⚖️ Reconciled (<span id="countRelRec">0</span>)</button>
+                    </div>
+                    <div class="toolbar-actions">
+                        <label class="toggle-control">
+                            <input type="checkbox" id="crossDocOnlyToggle" checked>
+                            <span class="toggle-slider"></span>
+                            <span class="toggle-label">Cross-Document Only</span>
+                        </label>
+                        <button class="btn btn-secondary btn-sm" id="refreshRelationshipsBtn">🔄 Refresh</button>
+                    </div>
+                </div>
+
+                <div class="relationships-feed" id="relationshipsFeed">
+                    <div class="empty-state">
+                        <div class="empty-icon">🌱</div>
+                        <h4>No Relationships Discovered Yet</h4>
+                        <p>Upload two or more PDFs (or click a sample dataset button above) to extract facts and watch Concord discover cross-document relationships.</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 2: Facts View -->
+            <section class="tab-pane" id="paneFacts">
+                <div class="toolbar facts-toolbar">
+                    <div class="search-input-wrap">
+                        <span class="search-icon">🔎</span>
+                        <input type="text" id="factsSearchInput" class="form-input search-input" placeholder="Search by entity, attribute, value, or quote...">
+                    </div>
+                    <div class="filter-select-wrap">
+                        <select id="filterFactDocSelect" class="form-select">
+                            <option value="">All Documents</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" id="refreshFactsBtn">🔄 Refresh</button>
+                </div>
+
+                <div class="table-responsive">
+                    <table class="data-table" id="factsTable">
+                        <thead>
+                            <tr>
+                                <th>Subject</th>
+                                <th>Attribute</th>
+                                <th>Value & Unit</th>
+                                <th>Scope</th>
+                                <th>Source Doc</th>
+                                <th>Page</th>
+                                <th>Evidence Quote (Grounding)</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="factsTableBody">
+                            <tr>
+                                <td colspan="8" class="text-center py-4 text-muted">No facts extracted yet. Upload a PDF to begin.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB 3: Documents View -->
+            <section class="tab-pane" id="paneDocuments">
+                <div class="toolbar">
+                    <span class="text-muted">Managed Ingested Documents</span>
+                    <button class="btn btn-secondary btn-sm" id="refreshDocsBtn">🔄 Refresh</button>
+                </div>
+                <div class="documents-grid" id="documentsGrid">
+                    <div class="empty-state">
+                        <div class="empty-icon">📁</div>
+                        <h4>No Documents Ingested</h4>
+                        <p>Upload a PDF above to register documents into the knowledge layer.</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 4: Entity Resolution & Normalization -->
+            <section class="tab-pane" id="paneCanonicals">
+                <div class="info-callout">
+                    <h4>Why the Normalization Registry Matters</h4>
+                    <p>Financial reports describe identical entities with slight variations (e.g., <em>"Delhivery Ltd"</em> vs <em>"Delhivery Limited"</em> vs <em>"delhivery_inc"</em>). Concord uses a dynamic fuzzy Levenshtein registry to map varied mentions to unified canonical keys, ensuring deterministic structural matching across documents processed days apart.</p>
+                </div>
+
+                <div class="canonicals-grid">
+                    <div class="canonical-box">
+                        <div class="box-header">
+                            <h5>Canonical Subjects (Entities)</h5>
+                            <span class="badge" id="canonicalSubjectsCount">0</span>
+                        </div>
+                        <div class="chips-container" id="canonicalSubjectsList">
+                            <span class="text-muted">No subjects registered yet.</span>
+                        </div>
+                    </div>
+
+                    <div class="canonical-box">
+                        <div class="box-header">
+                            <h5>Canonical Attributes (Metrics)</h5>
+                            <span class="badge" id="canonicalAttributesCount">0</span>
+                        </div>
+                        <div class="chips-container" id="canonicalAttributesList">
+                            <span class="text-muted">No attributes registered yet.</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 5: Compare Sandbox -->
+            <section class="tab-pane" id="paneCompare">
+                <div class="compare-sandbox">
+                    <div class="info-callout">
+                        <h4>On-Demand Relation Judge Sandbox</h4>
+                        <p>Select any two facts from your knowledge layer to run an on-demand reconciliation judgment with the LLM.</p>
+                    </div>
+
+                    <div class="compare-pickers-grid">
+                        <div class="picker-column">
+                            <label for="compareFact1Select">Select Fact 1:</label>
+                            <select id="compareFact1Select" class="form-select select-fact">
+                                <option value="">-- Choose Fact 1 --</option>
+                            </select>
+                            <div class="fact-preview-card" id="previewFact1">
+                                <p class="text-muted">Select a fact above to preview its structured data and evidence quote.</p>
+                            </div>
+                        </div>
+
+                        <div class="compare-vs-badge">VS</div>
+
+                        <div class="picker-column">
+                            <label for="compareFact2Select">Select Fact 2:</label>
+                            <select id="compareFact2Select" class="form-select select-fact">
+                                <option value="">-- Choose Fact 2 --</option>
+                            </select>
+                            <div class="fact-preview-card" id="previewFact2">
+                                <p class="text-muted">Select a fact above to preview its structured data and evidence quote.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="compare-action-row">
+                        <button type="button" class="btn btn-primary" id="runCompareBtn">
+                            <span>⚖️ Run Relation Judge</span>
+                        </button>
+                    </div>
+
+                    <div class="compare-result-card hidden" id="compareResultCard">
+                        <div class="result-header">
+                            <h4>Comparison Result</h4>
+                            <span class="rel-badge" id="compareResultBadge"></span>
+                        </div>
+                        <div class="result-body" id="compareResultBody"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 6: Export & Backup -->
+            <section class="tab-pane" id="paneExport">
+                <div class="export-container">
+                    <div class="export-header-row">
+                        <div>
+                            <h4>Knowledge Layer Data Export</h4>
+                            <p class="text-muted">Export complete relational state including documents, grounded facts, claim fingerprints, and judged relationships.</p>
+                        </div>
+                        <button class="btn btn-primary" id="downloadExportJsonBtn">📥 Download JSON Bundle</button>
+                    </div>
+                    <pre class="json-preview" id="jsonExportPreview">Loading export bundle...</pre>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Fact Detail Modal -->
+    <div class="modal-backdrop hidden" id="factModal">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <h3 id="modalFactTitle">Fact Details</h3>
+                    <span class="badge" id="modalFactScope">Scope</span>
+                </div>
+                <button type="button" class="modal-close-btn" id="closeFactModalBtn">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="detail-section">
+                    <h5 class="section-label">Grounded Evidence Quote (Source Truth)</h5>
+                    <blockquote class="verbatim-quote" id="modalFactQuote">Quote preview</blockquote>
+                    <div class="citation-meta">
+                        <span class="citation-chip" id="modalFactDoc">📄 Document</span>
+                        <span class="citation-chip" id="modalFactPage">📍 Page</span>
+                        <span class="citation-chip" id="modalFactConfidence">🎯 Confidence</span>
+                    </div>
+                </div>
+
+                <div class="detail-grid">
+                    <div class="detail-item">
+                        <span class="item-label">Subject (Entity)</span>
+                        <span class="item-value" id="modalFactSubject">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="item-label">Normalized Entity Key</span>
+                        <span class="item-value code-pill" id="modalFactSubjectNorm">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="item-label">Attribute (Metric)</span>
+                        <span class="item-value" id="modalFactAttribute">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="item-label">Normalized Attribute Key</span>
+                        <span class="item-value code-pill" id="modalFactAttrNorm">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="item-label">Extracted Value & Unit</span>
+                        <span class="item-value highlight-value" id="modalFactValue">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="item-label">Claim Fingerprint</span>
+                        <span class="item-value code-pill" id="modalFactFingerprint">-</span>
+                    </div>
+                </div>
+
+                <div class="detail-section mt-4">
+                    <h5 class="section-label">Connected Relationships (<span id="modalRelCount">0</span>)</h5>
+                    <div class="modal-relationships-list" id="modalRelationshipsList">
+                        <p class="text-muted">No cross-document relationships recorded for this fact yet.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
     <script src="/app.js"></script>
 </body>
 </html>
