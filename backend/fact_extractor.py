@@ -8,6 +8,7 @@ and normalizes entities/attributes via NormalizationRegistry.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -137,29 +138,50 @@ async def extract_facts_from_chunk(
         page_text=chunk.text,
     )
 
-    try:
-        # LiteLLM handles Google, OpenAI, Anthropic through a unified interface
-        response = await litellm.acompletion(
-            model=target_model,
-            messages=[
-                {"role": "system", "content": FACT_EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            api_key=api_key,
-            temperature=0.1,
-            max_tokens=4000,
-            response_format={"type": "json_object"},
-        )
-        raw_text = response.choices[0].message.content or ""
-        return parse_llm_facts(raw_text, default_page=chunk.page_number)
-    except Exception as e:
-        logger.error(
-            "LLM extraction error for '%s' page %d: %s",
-            chunk.doc_name,
-            chunk.page_number,
-            e,
-        )
-        raise
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # LiteLLM handles Google, OpenAI, Anthropic through a unified interface
+            response = await litellm.acompletion(
+                model=target_model,
+                messages=[
+                    {"role": "system", "content": FACT_EXTRACTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                api_key=api_key,
+                temperature=0.1,
+                max_tokens=4000,
+                response_format={"type": "json_object"},
+            )
+            raw_text = response.choices[0].message.content or ""
+            return parse_llm_facts(raw_text, default_page=chunk.page_number)
+        except Exception as e:
+            err_msg = str(e).lower()
+            is_rate_limit = (
+                isinstance(e, litellm.RateLimitError)
+                or "429" in err_msg
+                or "quota" in err_msg
+                or "resource_exhausted" in err_msg
+            )
+            if is_rate_limit and attempt < max_retries - 1:
+                delay = 5.0 * (attempt + 1)
+                logger.warning(
+                    "Rate limit encountered on '%s' page %d (attempt %d/%d). Backing off for %.1fs...",
+                    chunk.doc_name,
+                    chunk.page_number,
+                    attempt + 1,
+                    max_retries,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(
+                    "LLM extraction error for '%s' page %d: %s",
+                    chunk.doc_name,
+                    chunk.page_number,
+                    e,
+                )
+                raise
 
 
 async def process_and_store_facts(
@@ -263,7 +285,7 @@ async def extract_document_facts(
     all_extracted: list[ExtractedFact] = []
     chunks_to_process = chunks[:max_pages] if max_pages else chunks
 
-    for chunk in chunks_to_process:
+    for idx, chunk in enumerate(chunks_to_process):
         try:
             facts = await extract_facts_from_chunk(
                 chunk=chunk,
@@ -279,6 +301,9 @@ async def extract_document_facts(
                 e,
             )
             continue
+        # Polite spacing between pages to stay comfortably within rate limits
+        if idx < len(chunks_to_process) - 1:
+            await asyncio.sleep(1.0)
 
     if not all_extracted:
         return []

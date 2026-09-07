@@ -7,6 +7,7 @@ and provides detailed evidence-grounded explanations with explicit reconciling f
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -172,20 +173,42 @@ async def judge_single_pair(
     target_model = model or DEFAULT_LLM_MODEL
     prompt = format_single_pair_prompt(pair)
 
-    response = await litellm.acompletion(
-        model=target_model,
-        messages=[
-            {"role": "system", "content": RELATION_JUDGE_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        api_key=api_key,
-        temperature=0.1,
-        max_tokens=1000,
-        response_format={"type": "json_object"},
-    )
-    raw_text = response.choices[0].message.content or ""
-    data = extract_json_from_llm(raw_text)
-    return parse_judgment_dict(data, pair)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = await litellm.acompletion(
+                model=target_model,
+                messages=[
+                    {"role": "system", "content": RELATION_JUDGE_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                api_key=api_key,
+                temperature=0.1,
+                max_tokens=1000,
+                response_format={"type": "json_object"},
+            )
+            raw_text = response.choices[0].message.content or ""
+            data = extract_json_from_llm(raw_text)
+            return parse_judgment_dict(data, pair)
+        except Exception as e:
+            err_msg = str(e).lower()
+            is_rate_limit = (
+                isinstance(e, litellm.RateLimitError)
+                or "429" in err_msg
+                or "quota" in err_msg
+                or "resource_exhausted" in err_msg
+            )
+            if is_rate_limit and attempt < max_retries - 1:
+                delay = 5.0 * (attempt + 1)
+                logger.warning(
+                    "Rate limit in relation judge (attempt %d/%d). Backing off for %.1fs...",
+                    attempt + 1,
+                    max_retries,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
 
 
 async def judge_batch_pairs(
@@ -202,22 +225,47 @@ async def judge_batch_pairs(
     target_model = model or DEFAULT_LLM_MODEL
     prompt = format_batch_pairs_prompt(pairs)
 
-    try:
-        response = await litellm.acompletion(
-            model=target_model,
-            messages=[
-                {"role": "system", "content": RELATION_JUDGE_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            api_key=api_key,
-            temperature=0.1,
-            max_tokens=3000,
-            response_format={"type": "json_object"},
-        )
-        raw_text = response.choices[0].message.content or ""
-        data = extract_json_from_llm(raw_text)
-        judgments_raw = data.get("judgments", [])
+    judgments_raw = None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = await litellm.acompletion(
+                model=target_model,
+                messages=[
+                    {"role": "system", "content": RELATION_JUDGE_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                api_key=api_key,
+                temperature=0.1,
+                max_tokens=3000,
+                response_format={"type": "json_object"},
+            )
+            raw_text = response.choices[0].message.content or ""
+            data = extract_json_from_llm(raw_text)
+            judgments_raw = data.get("judgments", [])
+            break
+        except Exception as e:
+            err_msg = str(e).lower()
+            is_rate_limit = (
+                isinstance(e, litellm.RateLimitError)
+                or "429" in err_msg
+                or "quota" in err_msg
+                or "resource_exhausted" in err_msg
+            )
+            if is_rate_limit and attempt < max_retries - 1:
+                delay = 5.0 * (attempt + 1)
+                logger.warning(
+                    "Rate limit in batch judge (attempt %d/%d). Backing off for %.1fs...",
+                    attempt + 1,
+                    max_retries,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.warning("Batch judging attempt failed (%s)", e)
+                break
 
+    if judgments_raw is not None:
         # Map judgments by pair index
         results: list[Relationship] = []
         for idx, pair in enumerate(pairs, start=1):
@@ -228,23 +276,20 @@ async def judge_batch_pairs(
             if matching_j:
                 results.append(parse_judgment_dict(matching_j, pair))
             else:
-                # If a specific pair index was missed in the batch, fallback to single call
                 single_rel = await judge_single_pair(pair, api_key, model)
                 results.append(single_rel)
         return results
 
-    except Exception as e:
-        logger.warning(
-            "Batch judging failed (%s), falling back to individual pair evaluations", e
-        )
-        results = []
-        for pair in pairs:
-            try:
-                rel = await judge_single_pair(pair, api_key, model)
-                results.append(rel)
-            except Exception as inner_e:
-                logger.error("Failed to judge pair %s vs %s: %s", pair.fact_1.id, pair.fact_2.id, inner_e)
-        return results
+    # Fallback to individual pair evaluations if batch failed
+    logger.warning("Batch judging failed, falling back to individual pair evaluations")
+    results = []
+    for pair in pairs:
+        try:
+            rel = await judge_single_pair(pair, api_key, model)
+            results.append(rel)
+        except Exception as inner_e:
+            logger.error("Failed to judge pair %s vs %s: %s", pair.fact_1.id, pair.fact_2.id, inner_e)
+    return results
 
 
 async def judge_and_store_candidates(
