@@ -8,7 +8,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // --- State ---
     const state = {
         apiKey: sessionStorage.getItem("concord_api_key") || "",
-        model: localStorage.getItem("concord_model") || "groq/llama-3.3-70b-versatile",
+        model: localStorage.getItem("concord_model") || "groq/openai/gpt-oss-120b",
         documents: [],
         facts: [],
         relationships: [],
@@ -165,10 +165,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
             // Auto-detect Groq API key (starts with gsk_)
             if (state.apiKey.startsWith("gsk_") && !state.model.startsWith("groq/")) {
-                state.model = "groq/llama-3.3-70b-versatile";
+                state.model = "groq/openai/gpt-oss-120b";
                 elements.modelSelect.value = state.model;
                 localStorage.setItem("concord_model", state.model);
-                showToast("Detected Groq Key — switched to Llama 3.3 70B", "info");
+                showToast("Detected Groq Key — switched to GPT OSS 120B", "info");
             }
         });
 

@@ -30,7 +30,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
-DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "groq/llama-3.3-70b-versatile")
+DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "groq/openai/gpt-oss-120b")
 
 # --- Embeddings ---
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")

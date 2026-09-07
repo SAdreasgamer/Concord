@@ -100,13 +100,13 @@ class PipelineTelemetry:
         self.llm_total_input_tokens += input_tokens
         self.llm_total_output_tokens += output_tokens
 
-    def compute_cost_estimate(self, model: str = "groq/llama-3.3-70b-versatile") -> float:
+    def compute_cost_estimate(self, model: str = "groq/openai/gpt-oss-120b") -> float:
         """
         Estimate API cost based on token usage.
         
-        Pricing (as of 2025):
-        - Groq Llama 3.3 70B: $0.59/1M input, $0.79/1M output
-        - Groq Llama 3.1 8B: $0.05/1M input, $0.08/1M output
+        Pricing (Groq LPU):
+        - Groq GPT OSS 120B: $0.15/1M input, $0.60/1M output
+        - Groq GPT OSS 20B: $0.075/1M input, $0.30/1M output
         - Gemini Flash: $0.075/1M input tokens, $0.30/1M output tokens
         - GPT-4o: $2.50/1M input, $10/1M output
         - Claude 3.5 Sonnet: $3/1M input, $15/1M output
@@ -114,12 +114,15 @@ class PipelineTelemetry:
         model_lower = model.lower()
         
         if "groq" in model_lower:
-            if "8b" in model_lower:
-                input_cost_per_m = 0.05
-                output_cost_per_m = 0.08
+            if "20b" in model_lower:
+                input_cost_per_m = 0.075
+                output_cost_per_m = 0.30
+            elif "qwen" in model_lower:
+                input_cost_per_m = 0.80
+                output_cost_per_m = 4.00
             else:
-                input_cost_per_m = 0.59
-                output_cost_per_m = 0.79
+                input_cost_per_m = 0.15
+                output_cost_per_m = 0.60
         elif "gemini" in model_lower and "flash" in model_lower:
             input_cost_per_m = 0.075
             output_cost_per_m = 0.30

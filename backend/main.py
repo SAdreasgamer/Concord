@@ -322,7 +322,7 @@ async def validate_key(
     key_to_test = get_effective_key(x_api_key, model=test_model)
 
     if key_to_test and key_to_test.startswith("gsk_") and not test_model.startswith("groq/"):
-        test_model = "groq/llama-3.3-70b-versatile"
+        test_model = "groq/openai/gpt-oss-120b"
 
     if not key_to_test:
         return JSONResponse(
@@ -339,7 +339,7 @@ async def validate_key(
             model=test_model,
             messages=[{"role": "user", "content": "Reply with exactly: ok"}],
             api_key=key_to_test,
-            max_tokens=5,
+            max_tokens=50,
         )
         return {
             "valid": True,
@@ -458,7 +458,7 @@ async def load_sample_dataset(
     model = model or DEFAULT_LLM_MODEL
     effective_key = get_effective_key(x_api_key, model=model)
     if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
-        model = "groq/llama-3.3-70b-versatile"
+        model = "groq/openai/gpt-oss-120b"
 
     facts_extracted = []
     relationships_found = []
@@ -598,7 +598,7 @@ async def upload_pdf(
     model = model or DEFAULT_LLM_MODEL
     effective_key = get_effective_key(x_api_key, model=model)
     if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
-        model = "groq/llama-3.3-70b-versatile"
+        model = "groq/openai/gpt-oss-120b"
 
     facts_extracted = []
     relationships_found = []
@@ -706,7 +706,7 @@ async def process_document(
     model = model or DEFAULT_LLM_MODEL
     effective_key = get_effective_key(x_api_key, model=model)
     if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
-        model = "groq/llama-3.3-70b-versatile"
+        model = "groq/openai/gpt-oss-120b"
 
     if not effective_key:
         raise HTTPException(
@@ -810,7 +810,7 @@ async def compare_facts_on_demand(
     model = model or DEFAULT_LLM_MODEL
     effective_key = get_effective_key(x_api_key, model=model)
     if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
-        model = "groq/llama-3.3-70b-versatile"
+        model = "groq/openai/gpt-oss-120b"
 
     if not effective_key:
         raise HTTPException(
