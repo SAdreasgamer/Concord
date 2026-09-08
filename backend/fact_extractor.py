@@ -308,9 +308,11 @@ async def extract_facts_from_batch(
         f"evidence_quote from that specific page's text."
     )
 
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
+            # On Groq, token reservation limits (TPM 8000) count max_tokens upfront
+            batch_max_tokens = 1500 if "groq" in target_model.lower() else 8000
             response = await litellm.acompletion(
                 model=target_model,
                 messages=[
@@ -319,7 +321,7 @@ async def extract_facts_from_batch(
                 ],
                 api_key=api_key,
                 temperature=0.1,
-                max_tokens=8000,  # More tokens for multi-page response
+                max_tokens=batch_max_tokens,
                 response_format={"type": "json_object"},
             )
             raw_text = response.choices[0].message.content or ""
@@ -346,10 +348,14 @@ async def extract_facts_from_batch(
                 or "429" in err_msg
                 or "quota" in err_msg
                 or "resource_exhausted" in err_msg
+                or "rate limit" in err_msg
             )
             if is_rate_limit:
-                if attempt < max_retries - 1 and "quota" not in err_msg:
+                if attempt < max_retries - 1:
                     delay = 3.0 * (attempt + 1)
+                    m = re.search(r"try again in ([\d\.]+)s", err_msg)
+                    if m:
+                        delay = max(delay, float(m.group(1)) + 1.0)
                     logger.warning(
                         "Rate limit on batch pages %s (attempt %d/%d). Backing off %.1fs...",
                         page_range,
@@ -448,13 +454,12 @@ async def extract_document_facts(
                     telemetry.facts_from_local_tables += len(local_facts)
                     has_extracted_local = True
 
-            # If page is primarily a table, do not waste LLM calls on it!
-            if classification.page_type in (PageType.TABLE_FINANCIAL, PageType.TABLE_STRUCTURED):
+            # Only skip LLM if local extraction actually found facts for this page
+            if classification.page_type == PageType.FINANCIAL_TABLE and has_extracted_local:
                 telemetry.pages_with_local_tables += 1
                 logger.info(
-                    "Page %d: Extracted %d facts locally via PyMuPDF table finder. Skipping LLM to save quota.",
+                    "Page %d: Extracted facts locally via PyMuPDF table finder. Skipping LLM.",
                     chunk.page_number,
-                    telemetry.facts_from_local_tables,
                 )
                 continue
 
@@ -474,7 +479,9 @@ async def extract_document_facts(
 
     # --- Stage 3: BATCH LLM EXTRACTION ---
     stage_extract = telemetry.start_stage("llm_extraction")
-    BATCH_SIZE = 10  # 10 pages per call leverages Gemini's 1M context to minimize calls
+    # On Groq, free tier has 8,000 TPM limit. 2 pages per batch (~1,000 prompt tokens)
+    # avoids rate limits completely. Gemini uses 10 pages per batch.
+    BATCH_SIZE = 2 if "groq" in (model or "").lower() else 10
 
     for batch_start in range(0, len(pages_for_llm), BATCH_SIZE):
         batch = pages_for_llm[batch_start : batch_start + BATCH_SIZE]
@@ -504,9 +511,10 @@ async def extract_document_facts(
             )
             continue
 
-        # Polite pacing between batches
+        # Polite pacing between batches (2s for Groq to refill 8000 TPM bucket)
         if batch_start + BATCH_SIZE < len(pages_for_llm):
-            await asyncio.sleep(1.0)
+            pace = 2.0 if "groq" in (model or "").lower() else 1.0
+            await asyncio.sleep(pace)
 
     stage_extract.stop()
 

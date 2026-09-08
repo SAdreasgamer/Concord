@@ -230,8 +230,9 @@ async def judge_batch_pairs(
     target_model = model or DEFAULT_LLM_MODEL
     prompt = format_batch_pairs_prompt(pairs)
 
+    batch_max_tokens = 1200 if "groq" in target_model.lower() else 3000
     judgments_raw = None
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             response = await litellm.acompletion(
@@ -242,7 +243,7 @@ async def judge_batch_pairs(
                 ],
                 api_key=api_key,
                 temperature=0.1,
-                max_tokens=3000,
+                max_tokens=batch_max_tokens,
                 response_format={"type": "json_object"},
             )
             raw_text = response.choices[0].message.content or ""
@@ -256,9 +257,13 @@ async def judge_batch_pairs(
                 or "429" in err_msg
                 or "quota" in err_msg
                 or "resource_exhausted" in err_msg
+                or "rate limit" in err_msg
             )
-            if is_rate_limit and attempt < max_retries - 1 and "quota" not in err_msg:
-                delay = 3.0 * (attempt + 1)
+            if is_rate_limit and attempt < max_retries - 1:
+                delay = 2.5 * (attempt + 1)
+                m = re.search(r"try again in ([\d\.]+)s", err_msg)
+                if m:
+                    delay = max(delay, float(m.group(1)) + 1.0)
                 logger.warning(
                     "Rate limit in batch judge (attempt %d/%d). Backing off for %.1fs...",
                     attempt + 1,

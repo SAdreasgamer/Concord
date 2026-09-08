@@ -6,6 +6,7 @@ FastAPI application entry point. Serves the REST API and static frontend.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -738,6 +739,8 @@ async def process_document(
         candidates = await matcher.find_candidates(new_facts=facts)
         telemetry.candidate_pairs_found = len(candidates)
         if candidates:
+            if "groq" in (model or "").lower():
+                await asyncio.sleep(2.0)
             relationships = await judge_and_store_candidates(
                 candidates=candidates,
                 db=db,
