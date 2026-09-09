@@ -6,14 +6,8 @@ python-multipart>=0.0.12
 # PDF parsing
 PyMuPDF>=1.25.0
 
-# LLM (multi-provider: Gemini, OpenAI, Claude)
+# LLM (multi-provider: Gemini, OpenAI, Claude, Groq)
 litellm>=1.60.0
-
-# Embeddings (local, no API key needed)
-sentence-transformers>=3.4.0
-
-# Fuzzy matching for normalization registry
-thefuzz[speedup]>=0.22.0
 
 # Async SQLite
 aiosqlite>=0.20.0
@@ -21,7 +15,6 @@ aiosqlite>=0.20.0
 # Utilities
 python-dotenv>=1.1.0
 pydantic>=2.10.0
-numpy>=2.0.0
 
 # Testing
 pytest>=8.0.0

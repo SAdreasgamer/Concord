@@ -10,62 +10,23 @@ from __future__ import annotations
 
 # --- Fact Extraction Prompts ---
 
-FACT_EXTRACTION_SYSTEM_PROMPT = """You are an expert fact extraction engine. Your task is to analyze document text and extract atomic, verifiable, grounded facts with precise source citations.
+FACT_EXTRACTION_SYSTEM_PROMPT = """You are an expert fact extraction engine. Extract atomic, grounded quantitative and factual claims from document text.
 
-RULES:
-1. GROUNDING (CRITICAL):
-   - Every fact MUST include an `evidence_quote` which is an EXACT, VERBATIM substring from the provided text.
-   - Do NOT paraphrase, summarize, or alter the quote. If the exact words are not in the text, do not extract it.
-   - Include the page number provided in the context.
+CRITICAL RULES:
+1. GROUNDING: Every fact MUST include `evidence_quote` which is an EXACT, VERBATIM substring from the text. Never paraphrase.
+2. ATOMIC: Extract discrete factual claims (numbers, percentages, dates, measurements).
+3. METRIC DIVERSITY: For multi-row tables, extract distinct primary metrics (e.g. Revenue/Income, Profit/Loss, Net Worth, Borrowings, Growth rates).
+4. FIELDS:
+   - `subject`: Entity or organization name as written (e.g. "Delhivery", "Reserve Bank of India").
+   - `attribute`: Metric or property as written (e.g. "Total income", "Restated loss", "Revenue from services").
+   - `value`: Raw number or value only as string (e.g. "49114.06", "36355", "8.2").
+   - `unit`: Unit of measurement (e.g. "₹ million", "%", "INR Crore"). Null if none.
+   - `temporal_scope`: Relevant time period (e.g. "FY21", "2024", "December 31, 2021"). Null if none.
+   - `conditions`: Qualifying context (e.g. "restated", "consolidated", "pro forma"). Null if none.
 
-2. ATOMIC DECOMPOSITION:
-   - Decompose compound sentences into single atomic facts.
-   - For example, if the text says: "In FY24, revenue grew by 15% to $120M from $104M in FY23, while EBITDA margin expanded 200 bps to 8.5%."
-     Decompose this into:
-     a) Subject: Company | Attribute: revenue | Value: 120 | Unit: million USD | Scope: FY24
-     b) Subject: Company | Attribute: revenue | Value: 104 | Unit: million USD | Scope: FY23
-     c) Subject: Company | Attribute: revenue growth YoY | Value: 15 | Unit: % | Scope: FY24
-     d) Subject: Company | Attribute: EBITDA margin | Value: 8.5 | Unit: % | Scope: FY24
-     e) Subject: Company | Attribute: EBITDA margin expansion YoY | Value: 200 | Unit: bps | Scope: FY24
-   - Sibling facts decomposed from the same sentence/statement MUST share the SAME `extraction_group_id` (e.g. "g1", "g2").
-
-3. NORMALIZATION:
-   - `subject`: The entity or organization name as written (e.g., "Delhivery Limited", "Reserve Bank of India").
-   - `subject_normalized`: Lowercase snake_case canonical identifier for the entity (e.g., "delhivery", "rbi"). Strip corporate suffixes like 'ltd', 'limited', 'inc', 'corp', 'pvt' unless essential to distinguish parent vs subsidiary.
-   - `attribute`: The property, metric, or statement as written (e.g., "Revenue from operations", "Real GDP Growth", "Adjusted EBITDA").
-   - `attribute_normalized`: Lowercase snake_case representation preserving meaningful qualifiers (e.g., "revenue_operations", "gdp_growth_real", "ebitda_adjusted", "net_profit"). Do NOT collapse distinct accounting metrics into a generic name (preserve differences between gross vs net, operating vs total).
-   - `value`: The numerical amount, percentage, or concise factual statement as a string. Keep only the raw number/value (e.g., "2075.54", "8.2", "45000", "positive").
-   - `unit`: The unit of measurement (e.g., "INR Crore", "%", "million USD", "MT", "bps", "count"). If dimensionless or qualitative, use null.
-   - `temporal_scope`: Standardized anchor period if known (e.g., "Q4_FY24", "FY2023", "2024-03-31", "FY25"). If relative (e.g. "last quarter"), resolve it using the document context if possible. If uncertain or not stated, use "unspecified". Never guess.
-   - `conditions`: Any conditional clauses, restatements, or qualifying scopes (e.g., "excluding express parcel", "restated", "consolidated", "standalone"). Use null if none.
-   - `confidence`: Number between 0.5 and 1.0 reflecting how explicitly the fact is stated.
-
-4. SCOPE & GENERALIZATION:
-   - Extract numerical facts, operational metrics, financial data, macroeconomic statistics, and explicit executive statements.
-   - Skip trivial narrative filler, table of contents entries, page numbers, or generic disclaimers.
-
-OUTPUT FORMAT:
-Respond with a single valid JSON object containing a "facts" array:
-{
-  "facts": [
-    {
-      "subject": "Delhivery Limited",
-      "subject_normalized": "delhivery",
-      "attribute": "Revenue from operations",
-      "attribute_normalized": "revenue_operations",
-      "value": "2075.54",
-      "unit": "INR Crore",
-      "temporal_scope": "Q4_FY24",
-      "conditions": "consolidated",
-      "evidence_quote": "Revenue from operations for Q4 FY24 stood at Rs. 2,075.54 Cr",
-      "page": 5,
-      "confidence": 0.95,
-      "extraction_group_id": "g1"
-    }
-  ]
-}
-If no relevant facts are found on the page, return {"facts": []}.
-"""
+OUTPUT FORMAT: Return ONLY a valid JSON object:
+{"facts": [{"subject": "...", "attribute": "...", "value": "...", "unit": "...", "temporal_scope": "...", "conditions": null, "evidence_quote": "exact quote from text", "confidence": 0.95}]}
+If no facts found, return {"facts": []}."""
 
 FACT_EXTRACTION_USER_PROMPT_TEMPLATE = """Document: {doc_name}
 Page Number: {page_number}
@@ -74,7 +35,7 @@ Page Number: {page_number}
 {page_text}
 --- END PAGE TEXT ---
 
-Extract all atomic, verifiable facts from the page above according to the instructions. Ensure every fact has an exact verbatim evidence_quote from the text."""
+Extract at most 1 fact per distinct metric row across different metrics (e.g. revenue/income, profit/loss, net worth, output, key rates) from the page above as JSON. Ensure every fact has an exact verbatim evidence_quote from the text."""
 
 
 # --- Relation Judging Prompts (for Phase 5) ---
@@ -95,23 +56,29 @@ Your task is to compare pairs of candidate facts extracted from documents and cl
 3. "reconciled":
    - The facts appear contradictory at first glance (e.g. different numbers or opposing statements), BUT the difference is fully explained by an identifiable contextual factor.
    - You MUST identify the `reconciling_factor`:
+     * "reporting_basis": Restated vs original historical statements, standalone vs consolidated, or revised estimates.
+     * "projection_vs_actual": One fact is a forward-looking institutional forecast/projection while the other is an actual or revised estimate.
      * "temporal_scope": Different time periods, quarters, fiscal years, or reporting cutoffs.
      * "entity_scope": Parent company vs consolidated group vs specific subsidiary.
-     * "unit_difference": Different currencies, gross vs net numbers, constant currency vs reported, or unit scales.
-     * "definition_difference": Different accounting definitions (e.g. Adjusted EBITDA vs statutory EBITDA, GAAP vs non-GAAP).
+     * "unit_difference": Different currencies, constant currency vs reported, or unit scales.
+     * "definition_difference": Different accounting definitions or statistical metrics (e.g. Real GDP at market prices vs Real GVA at basic prices, Headline CPI vs Core CPI, Adjusted EBITDA vs statutory EBITDA).
+     * "precision_or_rounding": Values differ solely due to decimals or rounding (e.g. -4,157.43 vs -4,157).
 
 REASONING GUIDELINES:
 - Check the exact evidence quotes for both facts before deciding.
+- If values differ because one is an institutional forecast (e.g. RBI projecting 7.2%, IMF projecting 7.0%) -> RECONCILED (projection_vs_actual).
+- If values differ because one is a Restated figure in a later filing and the other is an older figure -> RECONCILED (reporting_basis) or CONTRADICTS if conflicting without explanation.
 - If values differ because one is Q4 and the other is Full Year -> RECONCILED (temporal_scope).
-- If values differ because one is Standalone and the other is Consolidated -> RECONCILED (entity_scope).
 - If values differ because one is in INR Lakhs and the other in INR Crores -> check math; if equal -> CORROBORATES; if different -> examine why.
+- Unit conversions: Note that 1 Crore (Cr) = 10 Million (₹10M = ₹1 Cr). For instance, 81,415 million INR is 8,141.5 Crore, which agrees with 8,142 Crore within standard rounding (classify as CORROBORATES).
 - Provide a clear, concise `explanation` detailing your step-by-step reasoning.
+
 
 OUTPUT FORMAT:
 Respond with a JSON object:
 {
   "relation_type": "corroborates" | "contradicts" | "reconciled",
-  "reconciling_factor": "temporal_scope" | "entity_scope" | "unit_difference" | "definition_difference" | "none",
+  "reconciling_factor": "reporting_basis" | "projection_vs_actual" | "temporal_scope" | "entity_scope" | "unit_difference" | "definition_difference" | "precision_or_rounding" | "none",
   "explanation": "Detailed rationale explaining the judgment with references to the evidence quotes."
 }
 """

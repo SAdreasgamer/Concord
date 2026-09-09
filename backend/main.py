@@ -1,41 +1,39 @@
 """
 Concord — Fact Knowledge Layer API.
 
-FastAPI application entry point. Serves the REST API and static frontend.
+FastAPI application. Serves the REST API and static frontend.
+Clean, minimal endpoints — no over-engineering.
 """
 
 from __future__ import annotations
 
-import asyncio
+from datetime import datetime, timezone
+import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import litellm
 from fastapi import FastAPI, UploadFile, File, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from backend.config import PROJECT_ROOT
 from backend.database import Database
-from backend.embeddings import EmbeddingService
-from backend.matcher import CandidateMatcher
-from backend.normalization import NormalizationRegistry
+
+logger = logging.getLogger(__name__)
 
 # --- Singletons ---
 db = Database()
-registry = NormalizationRegistry(db)
-embedding_service = EmbeddingService()
-matcher = CandidateMatcher(db=db, embedding_service=embedding_service)
 
 
 # --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown logic."""
     await db.connect()
-    await registry.initialize()
     yield
     await db.close()
 
@@ -44,11 +42,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Concord",
     description="Fact Knowledge Layer — extract, ground, and compare facts across PDF documents.",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
-# CORS — allow all origins for local development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -58,354 +55,329 @@ app.add_middleware(
 )
 
 
-# --- Health Check ---
+# --- Helpers ---
+
+
+def resolve_model_and_key(
+    model: Optional[str], x_api_key: Optional[str]
+) -> tuple[str, Optional[str]]:
+    """Resolve the LLM model and API key from request headers or environment."""
+    from backend.config import (
+        DEFAULT_LLM_MODEL, GROQ_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY,
+    )
+
+    effective_model = model or DEFAULT_LLM_MODEL
+    effective_key = x_api_key
+
+    if not effective_key:
+        if "groq" in effective_model.lower() and GROQ_API_KEY:
+            effective_key = GROQ_API_KEY
+        elif "gemini" in effective_model.lower() and GEMINI_API_KEY:
+            effective_key = GEMINI_API_KEY
+        elif "gpt" in effective_model.lower() and OPENAI_API_KEY:
+            effective_key = OPENAI_API_KEY
+        elif "claude" in effective_model.lower() and ANTHROPIC_API_KEY:
+            effective_key = ANTHROPIC_API_KEY
+        elif GROQ_API_KEY:
+            effective_key = GROQ_API_KEY
+        elif GEMINI_API_KEY:
+            effective_key = GEMINI_API_KEY
+
+    return effective_model, effective_key
+
+
+# --- Health ---
 
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
     stats = await db.get_stats()
     return {"status": "ok", "stats": stats}
 
 
-# --- Document Endpoints ---
+@app.post("/api/validate-key")
+async def validate_key(
+    model: Optional[str] = Query(None),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    """Validate LLM model connectivity and credentials."""
+    effective_model, effective_key = resolve_model_and_key(model, x_api_key)
+    if not effective_key and not effective_model.startswith("ollama/"):
+        return {"valid": False, "model": effective_model, "message": "No API key found in request or .env."}
+
+    try:
+        extra_kwargs = {}
+        if effective_model.startswith("ollama/"):
+            from backend.config import OLLAMA_API_BASE
+            extra_kwargs["api_base"] = OLLAMA_API_BASE
+
+        await litellm.acompletion(
+            model=effective_model,
+            messages=[{"role": "user", "content": "ping"}],
+            api_key=effective_key if not effective_model.startswith("ollama/") else None,
+            max_tokens=10,
+            timeout=15,
+            **extra_kwargs,
+        )
+        return {"valid": True, "model": effective_model, "message": f"Connected to {effective_model} successfully!"}
+    except Exception as e:
+        logger.warning("Key validation failed for %s: %s", effective_model, e)
+        return {"valid": False, "model": effective_model, "message": str(e)}
+
+
+# --- Reset ---
+
+
+@app.post("/api/reset")
+async def reset():
+    """Wipe all data and uploaded files."""
+    await db.clear_all_data()
+    from backend.config import UPLOAD_DIR
+    deleted = 0
+    if UPLOAD_DIR.exists():
+        for f in UPLOAD_DIR.glob("*.pdf"):
+            try:
+                f.unlink()
+                deleted += 1
+            except Exception:
+                pass
+    return {"status": "success", "message": "All data wiped", "deleted_files": deleted}
+
+
+# --- Documents ---
 
 
 @app.get("/api/documents")
 async def list_documents():
-    """List all processed documents with fact counts."""
-    docs = await db.get_documents()
-    return {"documents": docs}
+    return {"documents": await db.get_documents()}
 
 
 @app.get("/api/documents/{doc_id}")
 async def get_document(doc_id: str):
-    """Get metadata for a single document."""
     doc = await db.get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     facts = await db.get_facts(source_doc_id=doc_id)
     rels = await db.get_relationships_for_document(doc_id)
-    return {
-        "document": {
-            **doc,
-            "fact_count": len(facts),
-            "relationship_count": len(rels),
-        }
-    }
+    return {"document": {**doc, "fact_count": len(facts), "relationship_count": len(rels)}}
 
 
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str):
-    """Delete a document and cascade delete its facts and relationships."""
-    success = await db.delete_document(doc_id)
-    if not success:
+    if not await db.delete_document(doc_id):
         raise HTTPException(status_code=404, detail="Document not found")
     return {"status": "deleted", "doc_id": doc_id}
 
 
-@app.get("/api/documents/{doc_id}/facts")
-async def get_document_facts(doc_id: str):
-    """Get all facts from a specific document."""
-    doc = await db.get_document(doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    facts = await db.get_facts(source_doc_id=doc_id)
-    return {"document": doc, "facts": facts, "count": len(facts)}
+# --- Facts ---
+
+
+@app.get("/api/facts")
+async def list_facts(
+    source_doc_id: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(500, ge=1, le=2000),
+):
+    facts = await db.get_facts(source_doc_id=source_doc_id, limit=limit)
+    if search:
+        q = search.strip().lower()
+        facts = [
+            f for f in facts
+            if q in f["subject"].lower()
+            or q in f["attribute"].lower()
+            or q in f["value"].lower()
+            or q in f["evidence_quote"].lower()
+        ]
+    return {"facts": facts, "count": len(facts)}
+
+
+@app.get("/api/facts/{fact_id}")
+async def get_fact_detail(fact_id: str):
+    fact = await db.get_fact(fact_id)
+    if not fact:
+        raise HTTPException(status_code=404, detail="Fact not found")
+    relationships = await db.get_relationships_for_fact(fact_id)
+    # Enrich with related facts
+    related_facts = []
+    for rel in relationships:
+        other_id = rel["fact_id_2"] if rel["fact_id_1"] == fact_id else rel["fact_id_1"]
+        other = await db.get_fact(other_id)
+        if other:
+            related_facts.append(other)
+    return {"fact": fact, "relationships": relationships, "related_facts": related_facts}
+
+
+@app.get("/api/facts/{fact_id}/related")
+async def get_fact_related(fact_id: str):
+    """Return relationships involving this fact, enriched with target_fact."""
+    relationships = await db.get_relationships_for_fact(fact_id)
+    enriched = []
+    for rel in relationships:
+        other_id = rel["fact_id_2"] if rel["fact_id_1"] == fact_id else rel["fact_id_1"]
+        other = await db.get_fact(other_id)
+        enriched.append({**rel, "target_fact": other})
+    return {"relationships": enriched}
+
+
+# --- Relationships ---
+
+
+class CompareRequest(BaseModel):
+    fact_id_1: str
+    fact_id_2: str
+
+
+@app.post("/api/relationships/compare")
+async def compare_facts(
+    req: CompareRequest,
+    model: Optional[str] = Query(None),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    """Ad-hoc judge between any two arbitrary facts."""
+    from backend.models import CandidatePair, Fact
+    from backend.relation_judge import judge_single_pair
+
+    f1_dict = await db.get_fact(req.fact_id_1)
+    f2_dict = await db.get_fact(req.fact_id_2)
+    if not f1_dict or not f2_dict:
+        raise HTTPException(status_code=404, detail="One or both facts not found")
+
+    f1 = Fact(**f1_dict)
+    f2 = Fact(**f2_dict)
+    eff_model, eff_key = resolve_model_and_key(model, x_api_key)
+
+    candidate = CandidatePair(
+        fact_1=f1,
+        fact_2=f2,
+        match_source=MatchSource.FUZZY,
+        is_intra_document=(f1.source_doc_id == f2.source_doc_id),
+    )
+    rel = await judge_single_pair(candidate, api_key=eff_key or "", model=eff_model)
+    if rel:
+        await db.insert_relationship(rel)
+        return {"relationship": rel.model_dump()}
+    raise HTTPException(status_code=500, detail="Relation judge could not evaluate pair.")
+
+
+@app.get("/api/relationships")
+async def list_relationships(
+    relation_type: Optional[str] = Query(None),
+    limit: int = Query(500, ge=1, le=2000),
+):
+    rels = await db.get_relationships(relation_type=relation_type, limit=limit)
+    # Enrich each relationship with its two facts
+    enriched = []
+    for rel in rels:
+        f1 = await db.get_fact(rel["fact_id_1"])
+        f2 = await db.get_fact(rel["fact_id_2"])
+        enriched.append({**rel, "fact_1": f1, "fact_2": f2})
+    return {"relationships": enriched, "count": len(enriched)}
+
+
+@app.get("/api/relationships/{rel_id}")
+async def get_relationship(rel_id: str):
+    rel = await db.get_relationship(rel_id)
+    if not rel:
+        raise HTTPException(status_code=404, detail="Relationship not found")
+    f1 = await db.get_fact(rel["fact_id_1"])
+    f2 = await db.get_fact(rel["fact_id_2"])
+    return {"relationship": rel, "fact_1": f1, "fact_2": f2}
 
 
 @app.get("/api/documents/{doc_id}/relationships")
 async def get_document_relationships(doc_id: str):
-    """Get all relationships where at least one fact belongs to this document."""
     doc = await db.get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    relationships = await db.get_relationships_for_document(doc_id)
+    rels = await db.get_relationships_for_document(doc_id)
     enriched = []
-    for rel in relationships:
+    for rel in rels:
         f1 = await db.get_fact(rel["fact_id_1"])
         f2 = await db.get_fact(rel["fact_id_2"])
         enriched.append({**rel, "fact_1": f1, "fact_2": f2})
     return {"document": doc, "relationships": enriched, "count": len(enriched)}
 
 
-# --- Fact Endpoints ---
+# --- Normalization & Telemetry Helpers ---
 
 
-@app.get("/api/facts")
-async def list_facts(
-    source_doc_id: Optional[str] = Query(None),
-    subject_normalized: Optional[str] = Query(None),
-    attribute_normalized: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
-    limit: int = Query(500, ge=1, le=2000),
-):
-    """List all facts, with optional filters by document, entity, attribute, or search query."""
-    all_facts = await db.get_facts(source_doc_id=source_doc_id, limit=limit)
-
-    # In-memory filtering for fine-grained criteria
-    filtered = all_facts
-    if subject_normalized:
-        s_norm = subject_normalized.strip().lower()
-        filtered = [f for f in filtered if f["subject_normalized"] == s_norm]
-    if attribute_normalized:
-        a_norm = attribute_normalized.strip().lower()
-        filtered = [f for f in filtered if f["attribute_normalized"] == a_norm]
-    if search:
-        q = search.strip().lower()
-        filtered = [
-            f
-            for f in filtered
-            if q in f["subject"].lower()
-            or q in f["attribute"].lower()
-            or q in f["value"].lower()
-            or q in f["evidence_quote"].lower()
-        ]
-
-    return {"facts": filtered, "count": len(filtered)}
-
-
-@app.get("/api/facts/{fact_id}")
-async def get_fact_detail(fact_id: str):
-    """Get a single fact with its relationships and related facts."""
-    fact = await db.get_fact(fact_id)
-    if not fact:
-        raise HTTPException(status_code=404, detail="Fact not found")
-
-    relationships = await db.get_relationships_for_fact(fact_id)
-
-    # Collect all related fact IDs
-    related_fact_ids = set()
-    for rel in relationships:
-        related_fact_ids.add(rel["fact_id_1"])
-        related_fact_ids.add(rel["fact_id_2"])
-    related_fact_ids.discard(fact_id)
-
-    # Fetch related facts
-    related_facts = []
-    for rid in related_fact_ids:
-        rf = await db.get_fact(rid)
-        if rf:
-            related_facts.append(rf)
-
-    return {
-        "fact": fact,
-        "relationships": relationships,
-        "related_facts": related_facts,
-    }
-
-
-@app.get("/api/facts/{fact_id}/related")
-async def get_fact_related(fact_id: str):
-    """Get all relationships for a specific fact, enriched with counterpart fact data."""
-    fact = await db.get_fact(fact_id)
-    if not fact:
-        raise HTTPException(status_code=404, detail="Fact not found")
-
-    relationships = await db.get_relationships_for_fact(fact_id)
-    enriched = []
-    for rel in relationships:
-        counterpart_id = rel["fact_id_2"] if rel["fact_id_1"] == fact_id else rel["fact_id_1"]
-        counterpart = await db.get_fact(counterpart_id)
-        enriched.append({
-            **rel,
-            "target_fact": counterpart,
-        })
-    return {"fact_id": fact_id, "relationships": enriched, "count": len(enriched)}
-
-
-# --- Relationship Endpoints ---
-
-
-@app.get("/api/relationships")
-async def list_relationships(
-    relation_type: Optional[str] = Query(None),
-    is_intra_document: Optional[bool] = Query(None),
-    limit: int = Query(500, ge=1, le=2000),
-):
-    """List all relationships, optionally filtered by type or intra-document scope."""
-    relationships = await db.get_relationships(
-        relation_type=relation_type, limit=limit
-    )
-
-    if is_intra_document is not None:
-        target_val = 1 if is_intra_document else 0
-        relationships = [r for r in relationships if r.get("is_intra_document") == target_val]
-
-    # Enrich with fact data
-    enriched = []
-    for rel in relationships:
-        fact_1 = await db.get_fact(rel["fact_id_1"])
-        fact_2 = await db.get_fact(rel["fact_id_2"])
-        enriched.append({**rel, "fact_1": fact_1, "fact_2": fact_2})
-
-    return {"relationships": enriched, "count": len(enriched)}
-
-
-@app.get("/api/relationships/{rel_id}")
-async def get_relationship_detail(rel_id: str):
-    """Get a single relationship by ID with enriched fact details."""
-    rel = await db.get_relationship(rel_id)
-    if not rel:
-        raise HTTPException(status_code=404, detail="Relationship not found")
-    f1 = await db.get_fact(rel["fact_id_1"])
-    f2 = await db.get_fact(rel["fact_id_2"])
-    return {**rel, "fact_1": f1, "fact_2": f2}
-
-
-# --- Export Endpoint ---
+@app.get("/api/normalization/canonicals")
+async def get_canonicals():
+    """Return unique subjects and attributes derived from extracted facts."""
+    facts = await db.get_facts(limit=2000)
+    subjects = sorted(list(set(f["subject"] for f in facts if f.get("subject"))))
+    attributes = sorted(list(set(f["attribute"] for f in facts if f.get("attribute"))))
+    return {"subjects": subjects, "attributes": attributes}
 
 
 @app.get("/api/export")
 async def export_data():
-    """Export complete fact knowledge layer (documents, facts, relationships)."""
+    """Export complete knowledge layer snapshot as JSON."""
     docs = await db.get_documents()
-    facts = await db.get_facts(limit=10000)
-    rels = await db.get_relationships(limit=10000)
-    stats = await db.get_stats()
-
-    # Clean embeddings from export
-    cleaned_facts = [{k: v for k, v in f.items() if k != "embedding"} for f in facts]
-
+    facts = await db.get_facts(limit=5000)
+    rels = await db.get_relationships(limit=5000)
     return {
-        "export_metadata": {
-            "version": "0.1.0",
-            "stats": stats,
-        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "counts": {"documents": len(docs), "facts": len(facts), "relationships": len(rels)},
         "documents": docs,
-        "facts": cleaned_facts,
+        "facts": facts,
         "relationships": rels,
     }
 
 
-# --- Key Validation ---
+@app.get("/api/telemetry")
+async def get_telemetry():
+    """Return telemetry and cost reduction metrics for the frontend."""
+    stats = await db.get_stats()
+    return {
+        "cumulative_local_facts": 0,
+        "local_extraction_ratio_pct": 0,
+        "cumulative_skipped_pages": 0,
+        "pages_saved_pct": 0,
+        "recent_runs": [],
+        "naive_baseline": {
+            "calls_saved": 0,
+            "reduction_factor": "1.0x",
+            "cost_saved_usd": 0.0,
+        },
+    }
 
 
-def get_effective_key(header_key: Optional[str] = None, model: Optional[str] = None) -> Optional[str]:
-    """Retrieve API key from request header or reload dynamically from .env file."""
-    from dotenv import load_dotenv
-    load_dotenv(override=True)
-    if header_key and header_key.strip():
-        return header_key.strip()
-
-    if model:
-        m = model.lower()
-        if "groq" in m:
-            return os.getenv("GROQ_API_KEY") or None
-        if "gemini" in m:
-            return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None
-        if "gpt" in m or "openai" in m:
-            return os.getenv("OPENAI_API_KEY") or None
-        if "claude" in m or "anthropic" in m:
-            return os.getenv("ANTHROPIC_API_KEY") or None
-
-    return (
-        os.getenv("GROQ_API_KEY")
-        or os.getenv("GEMINI_API_KEY")
-        or os.getenv("GOOGLE_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or os.getenv("ANTHROPIC_API_KEY")
-        or None
-    )
+# --- Sample Datasets ---
 
 
-@app.post("/api/validate-key")
-async def validate_key(
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    model: Optional[str] = Query(None),
-):
-    """Validate an LLM API key with a lightweight test call (supports X-API-Key header or .env)."""
-    import litellm
+def _discover_sample_datasets() -> dict:
+    """Dynamically discover sample datasets from starter-datasets/ directory."""
+    datasets = {}
+    starter_dir = PROJECT_ROOT / "starter-datasets"
+    if not starter_dir.exists():
+        return datasets
 
-    from backend.config import DEFAULT_LLM_MODEL
-
-    test_model = model or DEFAULT_LLM_MODEL
-    key_to_test = get_effective_key(x_api_key, model=test_model)
-
-    if key_to_test and key_to_test.startswith("gsk_") and not test_model.startswith("groq/"):
-        test_model = "groq/openai/gpt-oss-120b"
-
-    if not key_to_test:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "valid": False,
-                "message": "No API key provided. Paste it in the UI or in the .env file.",
-                "model": test_model,
-            },
-        )
-
-    try:
-        response = litellm.completion(
-            model=test_model,
-            messages=[{"role": "user", "content": "Reply with exactly: ok"}],
-            api_key=key_to_test,
-            max_tokens=50,
-        )
-        return {
-            "valid": True,
-            "message": "API key is valid",
-            "model": test_model,
-        }
-    except Exception as e:
-        return JSONResponse(
-            status_code=401,
-            content={
-                "valid": False,
-                "message": f"Key validation failed: {str(e)}",
-                "model": test_model,
-            },
-        )
-
-
-# --- Sample Datasets (One-Click Testing) ---
-
-SAMPLE_DATASETS = {
-    "delhivery_q4": {
-        "title": "Delhivery Q4 FY24 Earnings",
-        "category": "Earnings Presentation",
-        "filename": "03-delhivery-q4-fy24-earnings-presentation.pdf",
-        "rel_path": "starter-datasets/delhivery/03-delhivery-q4-fy24-earnings-presentation.pdf",
-    },
-    "delhivery_prospectus": {
-        "title": "Delhivery Prospectus 2022",
-        "category": "IPO Prospectus Excerpt",
-        "filename": "01-delhivery-prospectus-2022-excerpt.pdf",
-        "rel_path": "starter-datasets/delhivery/01-delhivery-prospectus-2022-excerpt.pdf",
-    },
-    "delhivery_annual": {
-        "title": "Delhivery Annual Report FY24",
-        "category": "Annual Report Excerpt",
-        "filename": "02-delhivery-annual-report-fy24-excerpt.pdf",
-        "rel_path": "starter-datasets/delhivery/02-delhivery-annual-report-fy24-excerpt.pdf",
-    },
-    "economic_survey": {
-        "title": "India Economic Survey 2024-25",
-        "category": "Macroeconomy Excerpt",
-        "filename": "01-india-economic-survey-2024-25-excerpt.pdf",
-        "rel_path": "starter-datasets/india-macroeconomy/01-india-economic-survey-2024-25-excerpt.pdf",
-    },
-    "rbi_annual": {
-        "title": "RBI Annual Report 2024-25",
-        "category": "Central Bank Report",
-        "filename": "02-rbi-annual-report-2024-25-excerpt.pdf",
-        "rel_path": "starter-datasets/india-macroeconomy/02-rbi-annual-report-2024-25-excerpt.pdf",
-    },
-}
+    for category_dir in sorted(starter_dir.iterdir()):
+        if not category_dir.is_dir() or category_dir.name.startswith("."):
+            continue
+        for pdf_file in sorted(category_dir.glob("*.pdf")):
+            key = pdf_file.stem.replace("-", "_")
+            # Generate a human-readable title from filename
+            title = pdf_file.stem.replace("-", " ").title()
+            # Remove leading numbers like "01 "
+            title = title.lstrip("0123456789 ")
+            datasets[key] = {
+                "title": title,
+                "category": category_dir.name.replace("-", " ").title(),
+                "filename": pdf_file.name,
+                "rel_path": str(pdf_file.relative_to(PROJECT_ROOT)),
+            }
+    return datasets
 
 
 @app.get("/api/sample-datasets")
 async def list_sample_datasets():
-    """List bundled starter datasets available for instant one-click ingestion."""
+    datasets = _discover_sample_datasets()
     return {
         "samples": [
-            {
-                "key": k,
-                "title": v["title"],
-                "category": v["category"],
-                "filename": v["filename"],
-            }
-            for k, v in SAMPLE_DATASETS.items()
+            {"key": k, "title": v["title"], "category": v["category"], "filename": v["filename"]}
+            for k, v in datasets.items()
         ]
     }
 
@@ -417,122 +389,74 @@ async def load_sample_dataset(
     model: Optional[str] = Query(None),
     max_pages: Optional[int] = Query(None),
 ):
-    """
-    Load and process a bundled starter dataset with a single click.
-    Uses the hybrid extraction pipeline with telemetry.
-    """
-    import os
-    import uuid
-
-    from backend.config import PROJECT_ROOT, UPLOAD_DIR
+    """Load a bundled starter PDF and process it."""
+    from backend.config import DEFAULT_PAGE_LIMIT, UPLOAD_DIR
     from backend.fact_extractor import extract_document_facts
+    from backend.matcher import find_candidates
     from backend.pdf_parser import get_page_count, parse_pdf
-    from backend.telemetry import PipelineTelemetry
+    from backend.relation_judge import judge_and_store_candidates
 
-    sample = SAMPLE_DATASETS.get(dataset_key)
+    effective_max_pages = DEFAULT_PAGE_LIMIT if max_pages is None else (None if max_pages <= 0 else max_pages)
+
+    datasets = _discover_sample_datasets()
+    sample = datasets.get(dataset_key)
     if not sample:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Sample dataset '{dataset_key}' not found. Available: {list(SAMPLE_DATASETS.keys())}",
-        )
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_key}' not found. Available: {list(datasets.keys())}")
 
     file_path = PROJECT_ROOT / sample["rel_path"]
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Sample PDF file missing on disk")
+        raise HTTPException(status_code=404, detail="Sample PDF file missing")
 
     file_bytes = file_path.read_bytes()
     doc_id = str(uuid.uuid4())
     doc_name = sample["filename"]
 
-    chunks = parse_pdf(file_bytes, doc_name=doc_name, doc_id=doc_id)
-    page_count = get_page_count(file_bytes)
+    chunks = parse_pdf(file_bytes, doc_name=doc_name, doc_id=doc_id, max_pages=effective_max_pages)
+    page_count = len(chunks)
 
-    # Save to uploads
     save_path = UPLOAD_DIR / f"{doc_id}.pdf"
     save_path.write_bytes(file_bytes)
-
-    # Insert document
     await db.insert_document(doc_id, doc_name, page_count)
 
-    from backend.config import DEFAULT_LLM_MODEL
+    model, effective_key = resolve_model_and_key(model, x_api_key)
 
-    model = model or DEFAULT_LLM_MODEL
-    effective_key = get_effective_key(x_api_key, model=model)
-    if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
-        model = "groq/openai/gpt-oss-120b"
-
-    facts_extracted = []
-    relationships_found = []
-    telemetry = PipelineTelemetry()
-    telemetry.start()
+    facts = []
+    relationships = []
 
     if effective_key:
         try:
-            facts_extracted = await extract_document_facts(
-                chunks=chunks,
-                doc_id=doc_id,
-                doc_name=doc_name,
-                db=db,
-                registry=registry,
-                api_key=effective_key,
-                model=model,
-                max_pages=max_pages,
-                telemetry=telemetry,
+            facts = await extract_document_facts(
+                chunks=chunks, doc_id=doc_id, doc_name=doc_name,
+                db=db, api_key=effective_key, model=model, max_pages=effective_max_pages,
             )
-            if facts_extracted:
-                stage_match = telemetry.start_stage("matching_and_judging")
-                candidates = await matcher.find_candidates(new_facts=facts_extracted)
-                telemetry.candidate_pairs_found = len(candidates)
+            if facts:
+                candidates = await find_candidates(new_facts=facts, db=db)
                 if candidates:
-                    from backend.relation_judge import judge_and_store_candidates
-
-                    relationships_found = await judge_and_store_candidates(
-                        candidates=candidates,
-                        db=db,
-                        api_key=effective_key,
-                        model=model,
+                    relationships = await judge_and_store_candidates(
+                        candidates=candidates, db=db, api_key=effective_key, model=model,
                     )
-                    telemetry.relationships_discovered = len(relationships_found)
-                    telemetry.judge_api_calls = len(candidates)
-                stage_match.stop()
         except Exception as e:
-            telemetry.stop()
+            logger.error("Processing error: %s", e)
             return {
-                "doc_id": doc_id,
-                "doc_name": doc_name,
-                "page_count": page_count,
-                "chunks_extracted": len(chunks),
-                "fact_count": 0,
-                "relationship_count": 0,
-                "status": "extraction_error",
-                "message": f"Sample document parsed, but processing encountered: {str(e)}",
-                "telemetry": telemetry.to_dict(),
+                "doc_id": doc_id, "doc_name": doc_name, "page_count": page_count,
+                "fact_count": len(facts), "relationship_count": len(relationships),
+                "status": "partial_error", "message": str(e),
             }
-
-    telemetry.stop()
-    from backend.telemetry import global_telemetry
-    global_telemetry.record_run(doc_id, doc_name, telemetry)
 
     return {
         "doc_id": doc_id,
         "doc_name": doc_name,
         "page_count": page_count,
-        "chunks_extracted": len(chunks),
-        "fact_count": len(facts_extracted),
-        "relationship_count": len(relationships_found),
+        "fact_count": len(facts),
+        "relationship_count": len(relationships),
         "status": "extracted" if effective_key else "parsed_only",
-        "message": (
-            f"Extracted {len(facts_extracted)} facts and discovered {len(relationships_found)} relationships."
-            if effective_key
-            else "Sample PDF parsed successfully. Provide API key to extract facts."
-        ),
-        "facts_preview": [f.model_dump() for f in facts_extracted[:15]],
-        "relationships_preview": [r.model_dump() for r in relationships_found[:10]],
-        "telemetry": telemetry.to_dict(),
+        "message": f"Extracted {len(facts)} facts, discovered {len(relationships)} relationships." if effective_key else "Parsed. Provide API key to extract.",
+        "facts_preview": [f.model_dump() for f in facts[:15]],
+        "relationships_preview": [r.model_dump() for r in relationships[:10]],
     }
 
 
-# --- PDF Upload & Processing ---
+# --- PDF Upload ---
 
 
 @app.post("/api/upload")
@@ -540,33 +464,23 @@ async def upload_pdf(
     file: UploadFile = File(...),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     model: Optional[str] = Query(None),
-    max_pages: Optional[int] = Query(None, description="Max pages to extract facts from"),
+    max_pages: Optional[int] = Query(None),
 ):
     """
-    Upload a PDF file for processing.
-
-    Uses the HYBRID extraction pipeline:
-    1. Parse PDF → page text + table detection
-    2. Classify pages → skip junk, route tables locally
-    3. Batch remaining pages to LLM → fewer API calls
-    4. Normalize → match → judge relationships
+    Upload a PDF, extract facts, match across documents, judge relationships.
+    Pipeline: Parse → Extract (LLM) → Fingerprint → Match → Judge (LLM) → Store
     """
-    import os
-    import uuid
-
-    from backend.config import UPLOAD_DIR
+    from backend.config import DEFAULT_PAGE_LIMIT, UPLOAD_DIR
     from backend.fact_extractor import extract_document_facts
+    from backend.matcher import find_candidates
     from backend.pdf_parser import get_page_count, parse_pdf
-    from backend.telemetry import PipelineTelemetry
+    from backend.relation_judge import judge_and_store_candidates
 
-    # Validate file type
+    effective_max_pages = DEFAULT_PAGE_LIMIT if max_pages is None else (None if max_pages <= 0 else max_pages)
+
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF files are accepted.",
-        )
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
-    # Read file content
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file.")
@@ -574,104 +488,61 @@ async def upload_pdf(
     doc_id = str(uuid.uuid4())
     doc_name = file.filename
 
-    # Parse PDF into page chunks (now includes table detection)
     try:
-        chunks = parse_pdf(file_bytes, doc_name=doc_name, doc_id=doc_id)
+        chunks = parse_pdf(file_bytes, doc_name=doc_name, doc_id=doc_id, max_pages=effective_max_pages)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     if not chunks:
-        raise HTTPException(
-            status_code=400,
-            detail="No extractable text found in the PDF. It may be a scanned document.",
-        )
+        raise HTTPException(status_code=400, detail="No extractable text found in PDF.")
 
-    # Save the uploaded file
     save_path = UPLOAD_DIR / f"{doc_id}.pdf"
     save_path.write_bytes(file_bytes)
 
-    # Store document metadata in DB
-    page_count = get_page_count(file_bytes)
+    page_count = len(chunks)
     await db.insert_document(doc_id, doc_name, page_count)
 
-    from backend.config import DEFAULT_LLM_MODEL
+    model, effective_key = resolve_model_and_key(model, x_api_key)
 
-    model = model or DEFAULT_LLM_MODEL
-    effective_key = get_effective_key(x_api_key, model=model)
-    if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
-        model = "groq/openai/gpt-oss-120b"
-
-    facts_extracted = []
-    relationships_found = []
-    telemetry = PipelineTelemetry()
-    telemetry.start()
+    facts = []
+    relationships = []
 
     if effective_key:
         try:
-            # Stage: Hybrid extraction (classify → local tables → batch LLM)
-            facts_extracted = await extract_document_facts(
-                chunks=chunks,
-                doc_id=doc_id,
-                doc_name=doc_name,
-                db=db,
-                registry=registry,
-                api_key=effective_key,
-                model=model,
-                max_pages=max_pages,
-                telemetry=telemetry,
+            facts = await extract_document_facts(
+                chunks=chunks, doc_id=doc_id, doc_name=doc_name,
+                db=db, api_key=effective_key, model=model, max_pages=effective_max_pages,
             )
-            # Stage: Candidate matching and relation judging
-            if facts_extracted:
-                stage_match = telemetry.start_stage("matching_and_judging")
-                candidates = await matcher.find_candidates(new_facts=facts_extracted)
-                telemetry.candidate_pairs_found = len(candidates)
+            if facts:
+                candidates = await find_candidates(new_facts=facts, db=db)
                 if candidates:
-                    from backend.relation_judge import judge_and_store_candidates
-
-                    relationships_found = await judge_and_store_candidates(
-                        candidates=candidates,
-                        db=db,
-                        api_key=effective_key,
-                        model=model,
+                    relationships = await judge_and_store_candidates(
+                        candidates=candidates, db=db, api_key=effective_key, model=model,
                     )
-                    telemetry.relationships_discovered = len(relationships_found)
-                    telemetry.judge_api_calls = len(candidates)  # Approximate
-                stage_match.stop()
         except Exception as e:
-            telemetry.stop()
-            # Document is still saved even if LLM processing hits an error
+            logger.error("Processing error: %s", e)
             return {
-                "doc_id": doc_id,
-                "doc_name": doc_name,
-                "page_count": page_count,
-                "chunks_extracted": len(chunks),
-                "fact_count": 0,
-                "relationship_count": 0,
-                "status": "extraction_error",
-                "message": f"Document parsed but processing failed: {str(e)}",
-                "telemetry": telemetry.to_dict(),
+                "doc_id": doc_id, "doc_name": doc_name, "page_count": page_count,
+                "fact_count": len(facts), "relationship_count": len(relationships),
+                "status": "partial_error", "message": str(e),
+                "facts_preview": [f.model_dump() for f in facts[:15]],
+                "relationships_preview": [r.model_dump() for r in relationships[:10]],
             }
-
-    telemetry.stop()
-    from backend.telemetry import global_telemetry
-    global_telemetry.record_run(doc_id, doc_name, telemetry)
 
     return {
         "doc_id": doc_id,
         "doc_name": doc_name,
         "page_count": page_count,
-        "chunks_extracted": len(chunks),
-        "fact_count": len(facts_extracted),
-        "relationship_count": len(relationships_found),
+        "fact_count": len(facts),
+        "relationship_count": len(relationships),
         "status": "extracted" if effective_key else "parsed_only",
         "message": (
-            f"Extracted {len(facts_extracted)} facts and discovered {len(relationships_found)} relationships."
+            f"Extracted {len(facts)} facts and discovered {len(relationships)} relationships."
             if effective_key
-            else "Document parsed. Pass X-API-Key header to extract facts and judge relationships."
+            else "Parsed. Pass X-API-Key header or set GROQ_API_KEY in .env to extract facts."
         ),
-        "facts_preview": [f.model_dump() for f in facts_extracted[:15]],
-        "relationships_preview": [r.model_dump() for r in relationships_found[:10]],
-        "telemetry": telemetry.to_dict(),
+        "facts_preview": [f.model_dump() for f in facts[:15]],
+        "relationships_preview": [r.model_dump() for r in relationships[:10]],
     }
 
 
@@ -682,190 +553,52 @@ async def process_document(
     model: Optional[str] = Query(None),
     max_pages: Optional[int] = Query(None),
 ):
-    """
-    Extract facts and judge relationships from an existing document using an API key.
-    Uses the hybrid extraction pipeline with telemetry.
-    """
-    import os
-
-    from backend.config import UPLOAD_DIR
+    """Re-process or initially process a document that was saved without an API key."""
+    from backend.config import DEFAULT_PAGE_LIMIT, UPLOAD_DIR
     from backend.fact_extractor import extract_document_facts
+    from backend.matcher import find_candidates
     from backend.pdf_parser import parse_pdf
     from backend.relation_judge import judge_and_store_candidates
-    from backend.telemetry import PipelineTelemetry
+
+    effective_max_pages = DEFAULT_PAGE_LIMIT if max_pages is None else (None if max_pages <= 0 else max_pages)
 
     doc = await db.get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    file_path = UPLOAD_DIR / f"{doc_id}.pdf"
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Source PDF file not found on server")
+    pdf_path = UPLOAD_DIR / f"{doc_id}.pdf"
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Stored PDF file not found on disk")
 
-    from backend.config import DEFAULT_LLM_MODEL
-
-    model = model or DEFAULT_LLM_MODEL
-    effective_key = get_effective_key(x_api_key, model=model)
-    if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
-        model = "groq/openai/gpt-oss-120b"
-
-    if not effective_key:
-        raise HTTPException(
-            status_code=400,
-            detail="API key required. Provide via X-API-Key header or set GROQ_API_KEY in .env.",
-        )
-
-    telemetry = PipelineTelemetry()
-    telemetry.start()
-
-    file_bytes = file_path.read_bytes()
-    chunks = parse_pdf(file_bytes, doc_name=doc["doc_name"], doc_id=doc_id)
+    doc_name = doc.get("doc_name") or doc.get("filename") or "document.pdf"
+    file_bytes = pdf_path.read_bytes()
+    chunks = parse_pdf(file_bytes, doc_name=doc_name, doc_id=doc_id, max_pages=effective_max_pages)
+    eff_model, eff_key = resolve_model_and_key(model, x_api_key)
+    if not eff_key and not eff_model.startswith("ollama/"):
+        raise HTTPException(status_code=400, detail="No API key found in request or .env")
 
     facts = await extract_document_facts(
-        chunks=chunks,
-        doc_id=doc_id,
-        doc_name=doc["doc_name"],
-        db=db,
-        registry=registry,
-        api_key=effective_key,
-        model=model,
-        max_pages=max_pages,
-        telemetry=telemetry,
+        chunks=chunks, doc_id=doc_id, doc_name=doc_name,
+        db=db, api_key=eff_key or "", model=eff_model, max_pages=effective_max_pages,
     )
-
     relationships = []
     if facts:
-        stage_match = telemetry.start_stage("matching_and_judging")
-        candidates = await matcher.find_candidates(new_facts=facts)
-        telemetry.candidate_pairs_found = len(candidates)
+        candidates = await find_candidates(new_facts=facts, db=db)
         if candidates:
-            if "groq" in (model or "").lower():
-                await asyncio.sleep(2.0)
             relationships = await judge_and_store_candidates(
-                candidates=candidates,
-                db=db,
-                api_key=effective_key,
-                model=model,
+                candidates=candidates, db=db, api_key=eff_key or "", model=eff_model,
             )
-            telemetry.relationships_discovered = len(relationships)
-            telemetry.judge_api_calls = len(candidates)
-        stage_match.stop()
-
-    telemetry.stop()
-    from backend.telemetry import global_telemetry
-    global_telemetry.record_run(doc_id, doc.get("doc_name", doc_id), telemetry)
 
     return {
         "doc_id": doc_id,
-        "doc_name": doc["doc_name"],
+        "doc_name": doc["filename"],
         "fact_count": len(facts),
         "relationship_count": len(relationships),
-        "facts": [f.model_dump() for f in facts],
-        "relationships": [r.model_dump() for r in relationships],
-        "telemetry": telemetry.to_dict(),
-    }
-
-
-@app.get("/api/telemetry")
-async def get_telemetry_summary():
-    """
-    Return pipeline telemetry and efficiency metrics across ingestion runs.
-    Demonstrates multi-page batching, local table parsing, and heuristic pre-filtering savings.
-    """
-    from backend.telemetry import global_telemetry
-    return global_telemetry.get_summary()
-
-
-@app.get("/api/documents/{doc_id}/telemetry")
-async def get_document_telemetry(doc_id: str):
-    """Return telemetry for a specific document run if available."""
-    from backend.telemetry import global_telemetry
-    data = global_telemetry.get_run(doc_id)
-    if not data:
-        raise HTTPException(status_code=404, detail="No telemetry recorded for this document run.")
-    return data
-
-
-from pydantic import BaseModel
-
-
-class CompareRequest(BaseModel):
-    fact_id_1: str
-    fact_id_2: str
-
-
-@app.post("/api/relationships/compare")
-async def compare_facts_on_demand(
-    req: CompareRequest,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    model: Optional[str] = Query(None),
-):
-    """
-    Judge relationship between any two specific facts on-demand.
-    """
-    import os
-
-    from backend.models import CandidatePair, Fact, MatchSource
-    from backend.relation_judge import judge_single_pair
-
-    from backend.config import DEFAULT_LLM_MODEL
-
-    model = model or DEFAULT_LLM_MODEL
-    effective_key = get_effective_key(x_api_key, model=model)
-    if effective_key and effective_key.startswith("gsk_") and not model.startswith("groq/"):
-        model = "groq/openai/gpt-oss-120b"
-
-    if not effective_key:
-        raise HTTPException(
-            status_code=400,
-            detail="API key required. Provide via X-API-Key header or set GROQ_API_KEY in .env.",
-        )
-
-    f1_dict = await db.get_fact(req.fact_id_1)
-    f2_dict = await db.get_fact(req.fact_id_2)
-
-    if not f1_dict or not f2_dict:
-        raise HTTPException(status_code=404, detail="One or both facts not found")
-
-    f1 = Fact(**f1_dict)
-    f2 = Fact(**f2_dict)
-
-    hint = "exact_scope" if f1.claim_fingerprint == f2.claim_fingerprint else "different_scope"
-    pair = CandidatePair(
-        fact_1=f1,
-        fact_2=f2,
-        match_source=MatchSource.STRUCTURAL,
-        match_hint=hint,
-        is_intra_document=(f1.source_doc_id == f2.source_doc_id),
-    )
-
-    relationship = await judge_single_pair(pair=pair, api_key=effective_key, model=model)
-    if not await db.relationship_exists(f1.id, f2.id):
-        await db.insert_relationship(relationship.model_dump())
-
-    return {
-        "relationship": relationship.model_dump(),
-        "fact_1": f1.model_dump(),
-        "fact_2": f2.model_dump(),
-    }
-
-
-# --- Normalization Registry Inspection ---
-
-
-@app.get("/api/normalization/canonicals")
-async def get_canonicals():
-    """List canonical normalized entities and attributes in the registry."""
-    subjects = await db.get_canonical_values("subject")
-    attributes = await db.get_canonical_values("attribute")
-    return {
-        "subjects": [s["canonical_value"] for s in subjects],
-        "attributes": [a["canonical_value"] for a in attributes],
+        "status": "extracted",
     }
 
 
 # --- Static Frontend ---
-# Mount frontend directory to serve the UI at the root
 _frontend_dir = PROJECT_ROOT / "frontend"
 if _frontend_dir.exists():
     app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")

@@ -1,9 +1,9 @@
 """
 LLM fact extraction module.
 
-Sends page chunks to the LLM and parses structured, grounded facts.
-Decomposes compound statements, extracts verbatim evidence quotes,
-and normalizes entities/attributes via NormalizationRegistry.
+Sends page text to the LLM and parses structured, grounded facts.
+No heuristics, no page classifiers, no local table extraction.
+Just: page text → LLM → structured facts.
 """
 
 from __future__ import annotations
@@ -13,14 +13,13 @@ import json
 import logging
 import re
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 import litellm
 
-from backend.config import DEFAULT_LLM_MODEL
+from backend.config import DEFAULT_LLM_MODEL, OLLAMA_API_BASE
 from backend.database import Database
 from backend.models import ExtractedFact, Fact, PageChunk
-from backend.normalization import NormalizationRegistry, generate_claim_fingerprint
 from backend.prompts import (
     FACT_EXTRACTION_SYSTEM_PROMPT,
     FACT_EXTRACTION_USER_PROMPT_TEMPLATE,
@@ -29,49 +28,171 @@ from backend.prompts import (
 logger = logging.getLogger(__name__)
 
 
-def parse_llm_facts(raw_text: str, default_page: int = 1) -> list[ExtractedFact]:
-    """
-    Parse LLM response text into a list of ExtractedFact objects.
+# --- Utilities ---
 
-    Extracts JSON even if wrapped in markdown fences (```json ... ```)
-    or preceded by narrative text.
-    """
-    if not raw_text or not raw_text.strip():
-        return []
 
-    # Strip markdown code blocks
-    cleaned = raw_text.strip()
+def clean_snake_case(text: str) -> str:
+    """Convert text to clean lowercase snake_case."""
+    if not text:
+        return "unspecified"
+    cleaned = re.sub(r"[^\w\s-]", "", text.strip())
+    cleaned = re.sub(r"[\s-]+", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_").lower()
+    # Strip corporate suffixes
+    for suffix in ("_limited", "_ltd", "_pvt_ltd", "_private_limited", "_inc", "_incorporated", "_corp", "_corporation", "_llc"):
+        if cleaned.endswith(suffix) and len(cleaned) > len(suffix):
+            cleaned = cleaned[: -len(suffix)].rstrip("_")
+            break
+    return cleaned or "unspecified"
+
+
+def normalize_temporal_scope(scope: Optional[str]) -> str:
+    """Normalize temporal scopes into canonical formats (e.g. fy2024, cy2023, q4_fy2024)."""
+    if not scope:
+        return "unspecified"
+    s = scope.strip().lower()
+    # Match quarters like Q4 FY24, Q4 2024
+    m_quarter = re.search(r"(q[1-4])\s*(?:of\s*)?(?:fy\s*)?(\d{2,4})", s)
+    if m_quarter:
+        q = m_quarter.group(1)
+        yr = int(m_quarter.group(2))
+        if yr < 100:
+            yr += 2000
+        return f"{q}_fy{yr}"
+    # Match fiscal year ranges like 2023-24, 2023/24, FY2023-24
+    m_range = re.search(r"(?:fy\s*)?(\d{4})[-/](\d{2,4})", s)
+    if m_range:
+        start_yr = int(m_range.group(1))
+        end_yr = int(m_range.group(2))
+        if end_yr < 100:
+            end_yr += (start_yr // 100) * 100
+        return f"fy{end_yr}"
+    # Match single FY like FY24, FY2024
+    m_single = re.search(r"fy\s*(\d{2,4})", s)
+    if m_single:
+        yr = int(m_single.group(1))
+        if yr < 100:
+            yr += 2000
+        return f"fy{yr}"
+    # Match calendar years like 2023, 2024
+    m_yr = re.search(r"\b(19\d\d|20\d\d)\b", s)
+    if m_yr:
+        return f"cy{m_yr.group(1)}"
+    return clean_snake_case(s)
+
+
+def normalize_attribute_name(attr: str) -> str:
+    """Normalize metric attribute names to canonical forms."""
+    c = clean_snake_case(attr)
+    # Strip trailing noisy qualifiers
+    for suffix in ("_rate", "_ratio", "_total", "_value", "_figure", "_level", "_estimate"):
+        if c.endswith(suffix) and len(c) > len(suffix) + 3:
+            c = c[: -len(suffix)]
+            break
+    # Domain-agnostic canonical mappings for common metric synonyms
+    synonyms = {
+        "profit_after_tax": "pat",
+        "profit_after_tax_loss": "pat",
+        "net_profit": "pat",
+        "net_loss": "pat",
+        "restated_profit": "pat",
+        "restated_loss": "pat",
+        "restated_loss_for_the_period": "pat",
+        "restated_loss_for_the_year": "pat",
+        "restated_profit_loss": "pat",
+        "revenue_from_operations": "revenue",
+        "total_revenue": "revenue",
+        "total_income": "revenue",
+        "real_gdp_growth": "gdp_growth",
+        "gdp_growth": "gdp_growth",
+        "growth_in_real_gdp": "gdp_growth",
+        "headline_inflation": "cpi_inflation",
+        "cpi_inflation": "cpi_inflation",
+        "retail_inflation": "cpi_inflation",
+        "gross_fiscal_deficit": "fiscal_deficit",
+    }
+    return synonyms.get(c, c)
+
+
+def generate_claim_fingerprint(
+    subject_normalized: str,
+    attribute_normalized: str,
+    temporal_scope: Optional[str] = None,
+) -> str:
+    """
+    Generate a structural claim fingerprint.
+    Format: `{subject}::{attribute}::{scope}`
+    Facts with identical fingerprints are candidates for corroboration or contradiction.
+    """
+    subj = clean_snake_case(subject_normalized)
+    attr = normalize_attribute_name(attribute_normalized)
+    scope = normalize_temporal_scope(temporal_scope)
+    return f"{subj}::{attr}::{scope}"
+
+
+# --- JSON Parsing ---
+
+
+def repair_and_parse_json(text: str) -> Optional[dict[str, Any]]:
+    """Parse JSON from LLM response, handling markdown fences and truncation."""
+    if not text or not text.strip():
+        return None
+    cleaned = text.strip()
+
+    # Strip markdown fences
     match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
     if match:
         cleaned = match.group(1).strip()
 
+    # Direct parse
     try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        logger.warning("Failed to parse LLM JSON: %s. Raw preview: %s", e, cleaned[:200])
-        # Attempt minimal regex extraction if JSON object is malformed
-        json_match = re.search(r"\{[\s\S]*\}", cleaned)
-        if json_match:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    # Repair truncated JSON
+    last_brace = cleaned.rfind("}")
+    if last_brace != -1:
+        truncated = cleaned[: last_brace + 1].strip()
+        for closer in ["]}", "}", "]"]:
             try:
-                data = json.loads(json_match.group(0))
+                return json.loads(truncated + closer)
             except Exception:
-                return []
-        else:
-            return []
+                continue
+        try:
+            return json.loads(truncated)
+        except Exception:
+            pass
 
-    # The prompt requests {"facts": [...]}
-    facts_raw = []
-    if isinstance(data, dict):
-        facts_raw = data.get("facts", [])
-    elif isinstance(data, list):
-        facts_raw = data
+    # Regex fallback: find individual fact objects
+    fact_objects = []
+    for obj_match in re.finditer(r'\{[^{}]*"subject"[^{}]*\}', cleaned):
+        try:
+            obj = json.loads(obj_match.group(0))
+            if isinstance(obj, dict) and "subject" in obj and "value" in obj:
+                fact_objects.append(obj)
+        except Exception:
+            pass
+    if fact_objects:
+        return {"facts": fact_objects}
 
+    return None
+
+
+def parse_llm_facts(raw_text: str, default_page: int = 1) -> list[ExtractedFact]:
+    """Parse LLM response into ExtractedFact objects."""
+    data = repair_and_parse_json(raw_text)
+    if not data:
+        logger.warning("Could not parse JSON from LLM. Preview: %s", raw_text[:200])
+        return []
+
+    facts_raw = data.get("facts", []) if isinstance(data, dict) else data if isinstance(data, list) else []
     results: list[ExtractedFact] = []
+
     for item in facts_raw:
         if not isinstance(item, dict):
             continue
 
-        # Validate minimum required fields
         subject = str(item.get("subject", "")).strip()
         attribute = str(item.get("attribute", "")).strip()
         value = str(item.get("value", "")).strip()
@@ -79,23 +200,21 @@ def parse_llm_facts(raw_text: str, default_page: int = 1) -> list[ExtractedFact]
 
         if not subject or not attribute or not value:
             continue
+        # Skip overly long values (prose dumps, not atomic facts)
+        if len(value) > 60 or len(value.split()) > 8:
+            continue
+        if len(attribute) > 60 or len(attribute.split()) > 8:
+            continue
 
-        # If evidence quote is missing, fallback to attribute + value rather than discarding
         if not evidence_quote:
             evidence_quote = f"{subject} {attribute}: {value}"
 
         try:
-            confidence = float(item.get("confidence", 0.85))
-            confidence = max(0.0, min(1.0, confidence))
+            confidence = max(0.0, min(1.0, float(item.get("confidence", 0.85))))
         except (ValueError, TypeError):
             confidence = 0.85
 
-        try:
-            page = int(item.get("page", default_page))
-        except (ValueError, TypeError):
-            page = default_page
-
-        extracted = ExtractedFact(
+        results.append(ExtractedFact(
             subject=subject,
             subject_normalized=str(item.get("subject_normalized") or subject),
             attribute=attribute,
@@ -105,134 +224,148 @@ def parse_llm_facts(raw_text: str, default_page: int = 1) -> list[ExtractedFact]
             temporal_scope=item.get("temporal_scope"),
             conditions=item.get("conditions"),
             evidence_quote=evidence_quote,
-            page=page,
+            page=default_page,
             confidence=confidence,
             extraction_group_id=item.get("extraction_group_id"),
-        )
-        results.append(extracted)
+        ))
 
     return results
 
 
-async def extract_facts_from_chunk(
+# --- LLM Extraction ---
+
+
+async def extract_facts_from_page(
     chunk: PageChunk,
     api_key: str,
     model: Optional[str] = None,
 ) -> list[ExtractedFact]:
-    """
-    Call the LLM to extract facts from a single PageChunk.
-
-    Args:
-        chunk: The PageChunk containing document text and page metadata.
-        api_key: User's LLM API key.
-        model: Model identifier (defaults to DEFAULT_LLM_MODEL).
-
-    Returns:
-        List of raw ExtractedFact models.
-    """
+    """Send a single page to the LLM and extract facts."""
     target_model = model or DEFAULT_LLM_MODEL
 
+    page_text = chunk.text[:2400] if len(chunk.text) > 2400 else chunk.text
     user_prompt = FACT_EXTRACTION_USER_PROMPT_TEMPLATE.format(
         doc_name=chunk.doc_name,
         page_number=chunk.page_number,
-        page_text=chunk.text,
+        page_text=page_text,
     )
 
-    max_retries = 3
+    max_retries = 4
     for attempt in range(max_retries):
         try:
-            # LiteLLM handles Google, OpenAI, Anthropic through a unified interface
+            extra_kwargs = {}
+            if target_model.startswith("ollama/"):
+                extra_kwargs["api_base"] = OLLAMA_API_BASE
+
             response = await litellm.acompletion(
                 model=target_model,
                 messages=[
                     {"role": "system", "content": FACT_EXTRACTION_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                api_key=api_key,
+                api_key=api_key if not target_model.startswith("ollama/") else None,
                 temperature=0.1,
-                max_tokens=4000,
-                response_format={"type": "json_object"},
+                max_tokens=350,
+                timeout=25,
+                **extra_kwargs,
             )
             raw_text = response.choices[0].message.content or ""
             return parse_llm_facts(raw_text, default_page=chunk.page_number)
+
         except Exception as e:
             err_msg = str(e).lower()
-            is_rate_limit = (
-                isinstance(e, litellm.RateLimitError)
-                or "429" in err_msg
-                or "quota" in err_msg
-                or "resource_exhausted" in err_msg
-            )
+            is_rate_limit = "429" in err_msg or "quota" in err_msg or "rate limit" in err_msg or "resource_exhausted" in err_msg
             if is_rate_limit and attempt < max_retries - 1:
-                delay = 5.0 * (attempt + 1)
-                logger.warning(
-                    "Rate limit encountered on '%s' page %d (attempt %d/%d). Backing off for %.1fs...",
-                    chunk.doc_name,
-                    chunk.page_number,
-                    attempt + 1,
-                    max_retries,
-                    delay,
-                )
+                delay = 3.0 * (attempt + 1)
+                m = re.search(r"try again in ([\d\.]+)s", err_msg)
+                if m:
+                    delay = max(delay, float(m.group(1)) + 1.0)
+                logger.warning("Rate limit on page %d (attempt %d/%d). Waiting %.1fs...", chunk.page_number, attempt + 1, max_retries, delay)
                 await asyncio.sleep(delay)
             else:
-                logger.error(
-                    "LLM extraction error for '%s' page %d: %s",
-                    chunk.doc_name,
-                    chunk.page_number,
-                    e,
-                )
-                raise
+                logger.error("Extraction failed for page %d: %s", chunk.page_number, e)
+                return []
+    return []
 
 
-async def process_and_store_facts(
-    extracted_facts: list[ExtractedFact],
+# --- Pipeline ---
+
+
+async def extract_document_facts(
+    chunks: list[PageChunk],
     doc_id: str,
     doc_name: str,
     db: Database,
-    registry: NormalizationRegistry,
+    api_key: str,
+    model: Optional[str] = None,
+    max_pages: Optional[int] = None,
+    high_signal_only: bool = True,
 ) -> list[Fact]:
     """
-    Resolve extracted facts against the NormalizationRegistry,
-    generate structural fingerprints, and persist to the database.
-
-    Args:
-        extracted_facts: Raw facts from LLM parsing.
-        doc_id: ID of the source document.
-        doc_name: Name of the source document.
-        db: Database instance.
-        registry: NormalizationRegistry for resolving entity/attribute keys.
-
-    Returns:
-        List of persisted Fact models.
+    Full extraction pipeline:
+    1. Select high-signal data pages (or user specified range)
+    2. Extract grounded facts from each selected page
+    3. Generate normalized claim fingerprints
+    4. Store in database
     """
+    from backend.pdf_parser import get_high_signal_chunks
+
+    if max_pages:
+        # Respect the user's page limit gate (e.g. first 15 pages)
+        subset = chunks[:max_pages]
+        non_fm = [c for c in subset if not c.is_front_matter and len(c.text.strip()) >= 50]
+        valid_subset = non_fm if non_fm else subset
+        if high_signal_only and len(valid_subset) > 3:
+            chunks_to_process = get_high_signal_chunks(valid_subset, max_chunks=3)
+        else:
+            chunks_to_process = valid_subset
+        logger.info(
+            "Selected %d high-signal pages within first %d-page gate for '%s': %s",
+            len(chunks_to_process),
+            max_pages,
+            doc_name,
+            [c.page_number for c in chunks_to_process],
+        )
+    elif high_signal_only and len(chunks) > 3:
+        chunks_to_process = get_high_signal_chunks(chunks, max_chunks=3)
+        logger.info(
+            "Selected %d high-signal data pages out of %d total pages for '%s': %s",
+            len(chunks_to_process),
+            len(chunks),
+            doc_name,
+            [c.page_number for c in chunks_to_process],
+        )
+    else:
+        chunks_to_process = chunks
+
+    all_extracted: list[ExtractedFact] = []
+
+    for chunk in chunks_to_process:
+        # Skip pages with very little text (covers, blank pages)
+        if len(chunk.text.strip()) < 50:
+            logger.debug("Skipping page %d: too little text (%d chars)", chunk.page_number, len(chunk.text))
+            continue
+
+        page_facts = await extract_facts_from_page(chunk, api_key, model)
+        all_extracted.extend(page_facts)
+        logger.info("Page %d: extracted %d facts", chunk.page_number, len(page_facts))
+
+        target_model = model or DEFAULT_LLM_MODEL
+        # Polite pacing between pages for rate limits
+        if "groq" in target_model.lower():
+            await asyncio.sleep(2.0)
+
+    if not all_extracted:
+        return []
+
+    # Fingerprint and store
     saved_facts: list[Fact] = []
+    for item in all_extracted:
+        subject_norm = clean_snake_case(item.subject_normalized)
+        attr_norm = clean_snake_case(item.attribute_normalized)
+        fingerprint = generate_claim_fingerprint(subject_norm, attr_norm, item.temporal_scope)
 
-    for item in extracted_facts:
-        # 1. Resolve normalized subject against canonical registry
-        subject_norm = await registry.resolve(
-            key_type="subject",
-            raw_value=item.subject,
-            proposed_normalized=item.subject_normalized,
-        )
-
-        # 2. Resolve normalized attribute against canonical registry
-        attr_norm = await registry.resolve(
-            key_type="attribute",
-            raw_value=item.attribute,
-            proposed_normalized=item.attribute_normalized,
-        )
-
-        # 3. Generate deterministic claim fingerprint
-        fingerprint = generate_claim_fingerprint(
-            subject_normalized=subject_norm,
-            attribute_normalized=attr_norm,
-            temporal_scope=item.temporal_scope,
-        )
-
-        # 4. Generate unique group ID if decomposition group is present
-        group_id = None
-        if item.extraction_group_id:
-            group_id = f"{doc_id}_{item.page}_{item.extraction_group_id}"
+        group_id = f"{doc_id}_{item.page}_{item.extraction_group_id}" if item.extraction_group_id else None
 
         fact_dict = {
             "id": str(uuid.uuid4()),
@@ -253,286 +386,9 @@ async def process_and_store_facts(
             "confidence": item.confidence,
         }
 
-        # Store in database
         fact_id = await db.insert_fact(fact_dict)
         fact_dict["id"] = fact_id
         saved_facts.append(Fact(**fact_dict))
 
-    logger.info(
-        "Persisted %d facts for document '%s' (%s)",
-        len(saved_facts),
-        doc_name,
-        doc_id,
-    )
+    logger.info("Stored %d facts for '%s'", len(saved_facts), doc_name)
     return saved_facts
-
-
-async def extract_facts_from_batch(
-    chunks: list[PageChunk],
-    api_key: str,
-    model: Optional[str] = None,
-) -> list[ExtractedFact]:
-    """
-    Extract facts from MULTIPLE pages in a SINGLE LLM call.
-
-    Batches 4-6 pages into one prompt with clear page delimiters.
-    This is the key cost optimization: 27 pages → ~5 API calls instead of 27.
-    """
-    if not chunks:
-        return []
-
-    # If only one chunk, fall back to single extraction
-    if len(chunks) == 1:
-        return await extract_facts_from_chunk(chunks[0], api_key, model)
-
-    target_model = model or DEFAULT_LLM_MODEL
-
-    # Build multi-page prompt with clear delimiters
-    page_sections = []
-    for chunk in chunks:
-        page_sections.append(
-            f"--- PAGE {chunk.page_number} (from: {chunk.doc_name}) ---\n"
-            f"{chunk.text}\n"
-            f"--- END PAGE {chunk.page_number} ---"
-        )
-
-    combined_text = "\n\n".join(page_sections)
-    page_range = f"{chunks[0].page_number}-{chunks[-1].page_number}"
-
-    user_prompt = (
-        f"Document: {chunks[0].doc_name}\n"
-        f"Pages: {page_range} ({len(chunks)} pages)\n\n"
-        f"{combined_text}\n\n"
-        f"Extract all atomic, verifiable facts from ALL {len(chunks)} pages above. "
-        f"Ensure every fact includes the correct page number and an exact verbatim "
-        f"evidence_quote from that specific page's text."
-    )
-
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            # On Groq, token reservation limits (TPM 8000) count max_tokens upfront
-            batch_max_tokens = 1500 if "groq" in target_model.lower() else 8000
-            response = await litellm.acompletion(
-                model=target_model,
-                messages=[
-                    {"role": "system", "content": FACT_EXTRACTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                api_key=api_key,
-                temperature=0.1,
-                max_tokens=batch_max_tokens,
-                response_format={"type": "json_object"},
-            )
-            raw_text = response.choices[0].message.content or ""
-
-            # Track token usage for telemetry
-            input_tokens = getattr(response.usage, "prompt_tokens", 0) if response.usage else 0
-            output_tokens = getattr(response.usage, "completion_tokens", 0) if response.usage else 0
-
-            facts = parse_llm_facts(raw_text, default_page=chunks[0].page_number)
-
-            logger.info(
-                "Batch extraction: %d facts from pages %s (%d input tokens, %d output tokens)",
-                len(facts),
-                page_range,
-                input_tokens,
-                output_tokens,
-            )
-            return facts
-
-        except Exception as e:
-            err_msg = str(e).lower()
-            is_rate_limit = (
-                isinstance(e, litellm.RateLimitError)
-                or "429" in err_msg
-                or "quota" in err_msg
-                or "resource_exhausted" in err_msg
-                or "rate limit" in err_msg
-            )
-            if is_rate_limit:
-                if attempt < max_retries - 1:
-                    delay = 3.0 * (attempt + 1)
-                    m = re.search(r"try again in ([\d\.]+)s", err_msg)
-                    if m:
-                        delay = max(delay, float(m.group(1)) + 1.0)
-                    logger.warning(
-                        "Rate limit on batch pages %s (attempt %d/%d). Backing off %.1fs...",
-                        page_range,
-                        attempt + 1,
-                        max_retries,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    logger.warning("Batch extraction hit rate limit / quota on pages %s. Skipping batch without per-page fallback.", page_range)
-                    raise e
-            else:
-                logger.error("Batch extraction failed for pages %s: %s", page_range, e)
-                # Fallback: try individual pages ONLY for format/JSON errors
-                logger.info("Falling back to individual page extraction for pages %s", page_range)
-                all_facts = []
-                for chunk in chunks:
-                    try:
-                        facts = await extract_facts_from_chunk(chunk, api_key, model)
-                        all_facts.extend(facts)
-                    except Exception as inner_e:
-                        logger.warning("Skipping page %d: %s", chunk.page_number, inner_e)
-                return all_facts
-
-
-async def extract_document_facts(
-    chunks: list[PageChunk],
-    doc_id: str,
-    doc_name: str,
-    db: Database,
-    registry: NormalizationRegistry,
-    api_key: str,
-    model: Optional[str] = None,
-    max_pages: Optional[int] = None,
-    telemetry: Optional["PipelineTelemetry"] = None,
-) -> list[Fact]:
-    """
-    HYBRID extraction pipeline — the core architectural differentiator.
-
-    Instead of blindly sending every page to the LLM like ChatGPT would,
-    Concord uses a 3-stage approach:
-
-    1. CLASSIFY: Heuristic page classifier skips junk pages (TOC, covers,
-       disclaimers) without touching the LLM.
-    2. LOCAL EXTRACT: Pages with structured tables get facts extracted
-       locally using PyMuPDF's table parser — zero API calls.
-    3. BATCH LLM: Remaining pages are batched into groups of 6 for
-       a single LLM call — 5x fewer API calls.
-
-    Result: A 27-page PDF that would cost 27 API calls now costs ~4-5.
-    """
-    from backend.page_classifier import classify_page, PageType
-    from backend.table_extractor import extract_facts_from_table
-    from backend.telemetry import PipelineTelemetry
-
-    if telemetry is None:
-        telemetry = PipelineTelemetry()
-
-    all_extracted: list[ExtractedFact] = []
-    chunks_to_process = chunks[:max_pages] if max_pages else chunks
-    telemetry.total_pages = len(chunks_to_process)
-
-    # --- Stage 1: CLASSIFY pages ---
-    stage_classify = telemetry.start_stage("page_classification")
-    pages_for_llm: list[PageChunk] = []
-
-    for chunk in chunks_to_process:
-        classification = classify_page(
-            text=chunk.text,
-            page_number=chunk.page_number,
-            has_tables=bool(chunk.tables),
-            table_row_count=chunk.table_row_count,
-        )
-
-        if not classification.should_send_to_llm:
-            telemetry.record_page_skip(classification.page_type.value)
-            logger.debug(
-                "Skipping page %d: %s (%s)",
-                chunk.page_number,
-                classification.page_type.value,
-                classification.reason,
-            )
-            continue
-
-        # --- Stage 2: LOCAL TABLE EXTRACTION (no LLM) ---
-        has_extracted_local = False
-        if classification.should_extract_tables_locally and chunk.tables:
-            for table_data in chunk.tables:
-                local_facts = extract_facts_from_table(
-                    table_data=table_data,
-                    doc_name=doc_name,
-                    page_number=chunk.page_number,
-                )
-                if local_facts:
-                    all_extracted.extend(local_facts)
-                    telemetry.facts_from_local_tables += len(local_facts)
-                    has_extracted_local = True
-
-            # Only skip LLM if local extraction actually found facts for this page
-            if classification.page_type == PageType.FINANCIAL_TABLE and has_extracted_local:
-                telemetry.pages_with_local_tables += 1
-                logger.info(
-                    "Page %d: Extracted facts locally via PyMuPDF table finder. Skipping LLM.",
-                    chunk.page_number,
-                )
-                continue
-
-        # Send to LLM only if it has narrative content
-        pages_for_llm.append(chunk)
-
-    stage_classify.stop()
-    telemetry.pages_sent_to_llm = len(pages_for_llm)
-
-    logger.info(
-        "Page classification: %d/%d pages going to LLM, %d skipped, %d local table facts",
-        len(pages_for_llm),
-        len(chunks_to_process),
-        telemetry.pages_skipped,
-        telemetry.facts_from_local_tables,
-    )
-
-    # --- Stage 3: BATCH LLM EXTRACTION ---
-    stage_extract = telemetry.start_stage("llm_extraction")
-    # On Groq, free tier has 8,000 TPM limit. 2 pages per batch (~1,000 prompt tokens)
-    # avoids rate limits completely. Gemini uses 10 pages per batch.
-    BATCH_SIZE = 2 if "groq" in (model or "").lower() else 10
-
-    for batch_start in range(0, len(pages_for_llm), BATCH_SIZE):
-        batch = pages_for_llm[batch_start : batch_start + BATCH_SIZE]
-
-        try:
-            batch_facts = await extract_facts_from_batch(
-                chunks=batch,
-                api_key=api_key,
-                model=model,
-            )
-            all_extracted.extend(batch_facts)
-            telemetry.facts_from_llm += len(batch_facts)
-            telemetry.record_llm_call()  # Token counts tracked inside
-        except Exception as e:
-            err_str = str(e).lower()
-            if "quota" in err_str or "resource_exhausted" in err_str:
-                logger.warning(
-                    "Free-tier API quota exhausted. Breaking batch loop to preserve %d extracted facts (including local table extractions).",
-                    len(all_extracted),
-                )
-                break
-            logger.warning(
-                "Skipping batch pages %d-%d: %s",
-                batch[0].page_number,
-                batch[-1].page_number,
-                e,
-            )
-            continue
-
-        # Polite pacing between batches (2s for Groq to refill 8000 TPM bucket)
-        if batch_start + BATCH_SIZE < len(pages_for_llm):
-            pace = 2.0 if "groq" in (model or "").lower() else 1.0
-            await asyncio.sleep(pace)
-
-    stage_extract.stop()
-
-    if not all_extracted:
-        return []
-
-    # --- Stage 4: NORMALIZE & PERSIST ---
-    stage_persist = telemetry.start_stage("normalization_and_storage")
-    result = await process_and_store_facts(
-        extracted_facts=all_extracted,
-        doc_id=doc_id,
-        doc_name=doc_name,
-        db=db,
-        registry=registry,
-    )
-    stage_persist.stop()
-
-    telemetry.compute_cost_estimate(model or DEFAULT_LLM_MODEL)
-    telemetry.log_summary()
-
-    return result

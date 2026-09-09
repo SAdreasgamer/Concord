@@ -4,25 +4,28 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Concord — Fact Knowledge Layer</title>
-    <meta name="description" content="AI Fact Knowledge Layer for financial and document analysis. Ingest PDFs, extract verifiable facts with verbatim evidence, and discover cross-document corroboration, contradiction, and reconciliation.">
+    <meta name="description" content="Fact Knowledge Layer for financial and document analysis. Ingest PDFs, extract verifiable facts with verbatim evidence, and discover cross-document corroboration, contradiction, and reconciliation.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/style.css?v=2.4">
 </head>
 <body>
-    <!-- Top Navigation Header -->
+    <!-- Top Navigation Bar -->
     <header class="app-header">
         <div class="header-brand">
             <div class="brand-logo">
-                <span class="logo-icon">⚖️</span>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+                    <path d="M2 12h20"/>
+                </svg>
             </div>
             <div class="brand-titles">
                 <div class="brand-name-row">
                     <h1 class="brand-name">Concord</h1>
+                    <span class="brand-divider">/</span>
                     <span class="brand-badge">Fact Knowledge Layer</span>
                 </div>
-                <p class="brand-tagline">Cross-Document Grounded Truth & Reconciliation</p>
             </div>
         </div>
 
@@ -34,22 +37,27 @@
 
             <div class="model-picker-wrap">
                 <select id="modelSelect" class="form-select" title="Select LLM Model">
-                    <option value="groq/openai/gpt-oss-120b" selected>⚡ Groq — GPT OSS 120B (Ultra Fast, High Accuracy)</option>
-                    <option value="groq/openai/gpt-oss-20b">⚡ Groq — GPT OSS 20B (Sub-Second Instant)</option>
-                    <option value="groq/qwen/qwen3.8-27b">⚡ Groq — Qwen 3.8 27B</option>
-                    <option value="gemini/gemini-3.6-flash">Gemini 3.6 Flash</option>
-                    <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                    <option value="gpt-4o">GPT-4o</option>
+                    <option value="groq/qwen/qwen3.8-27b" selected>Groq · Qwen 27B (Fast & Reliable)</option>
+                    <option value="groq/openai/gpt-oss-120b">Groq · GPT OSS 120B</option>
+                    <option value="groq/openai/gpt-oss-20b">Groq · GPT OSS 20B</option>
+                    <option value="ollama/phi3.5:latest">Local Ollama · Phi-3.5</option>
+                    <option value="claude-3-5-sonnet-20241022">Claude · 3.5 Sonnet</option>
+                    <option value="gpt-4o">OpenAI · GPT-4o</option>
                 </select>
             </div>
 
             <div class="api-key-box">
                 <div class="input-with-icon">
-                    <input type="password" id="apiKeyInput" class="form-input" placeholder="Paste Groq (gsk_...) or Gemini key..." autocomplete="off">
-                    <button type="button" id="toggleKeyVisibility" class="icon-btn" title="Show/Hide API Key">👁️</button>
+                    <input type="password" id="apiKeyInput" class="form-input" placeholder="API Key (optional if in .env)..." autocomplete="off">
+                    <button type="button" id="toggleKeyVisibility" class="icon-btn" title="Toggle visibility">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"/>
+                            <circle cx="12" cy="12" r="3"/>
+                        </svg>
+                    </button>
                 </div>
-                <button type="button" id="validateKeyBtn" class="btn btn-primary btn-sm">
-                    <span class="btn-text">Validate Key</span>
+                <button type="button" id="validateKeyBtn" class="btn btn-secondary btn-sm">
+                    <span class="btn-text">Validate</span>
                 </button>
                 <span id="keyStatusBadge" class="key-status-indicator"></span>
             </div>
@@ -58,42 +66,36 @@
 
     <!-- Main Container -->
     <div class="app-container">
-        <!-- Hero Metrics Strip -->
+        <!-- Metric Summary Bar -->
         <section class="metrics-strip">
             <div class="metric-card" id="cardMetricDocs">
-                <div class="metric-icon">📄</div>
-                <div class="metric-body">
-                    <span class="metric-label">Ingested Documents</span>
-                    <span class="metric-value" id="statDocsCount">0</span>
-                </div>
+                <span class="metric-label">Documents</span>
+                <span class="metric-value" id="statDocsCount">0</span>
             </div>
             <div class="metric-card" id="cardMetricFacts">
-                <div class="metric-icon">🔍</div>
-                <div class="metric-body">
-                    <span class="metric-label">Grounded Facts</span>
-                    <span class="metric-value" id="statFactsCount">0</span>
-                </div>
+                <span class="metric-label">Extracted Facts</span>
+                <span class="metric-value" id="statFactsCount">0</span>
             </div>
             <div class="metric-card metric-corroborates" id="cardMetricCorroborates">
-                <div class="metric-icon">🤝</div>
-                <div class="metric-body">
+                <div class="metric-label-row">
+                    <span class="dot dot-corroborates"></span>
                     <span class="metric-label">Corroborations</span>
-                    <span class="metric-value" id="statCorroboratesCount">0</span>
                 </div>
-            </div>
-            <div class="metric-card metric-contradicts" id="cardMetricContradicts">
-                <div class="metric-icon">⚔️</div>
-                <div class="metric-body">
-                    <span class="metric-label">Contradictions</span>
-                    <span class="metric-value" id="statContradictsCount">0</span>
-                </div>
+                <span class="metric-value text-corroborates" id="statCorroboratesCount">0</span>
             </div>
             <div class="metric-card metric-reconciled" id="cardMetricReconciled">
-                <div class="metric-icon">⚖️</div>
-                <div class="metric-body">
+                <div class="metric-label-row">
+                    <span class="dot dot-reconciled"></span>
                     <span class="metric-label">Reconciled</span>
-                    <span class="metric-value" id="statReconciledCount">0</span>
                 </div>
+                <span class="metric-value text-reconciled" id="statReconciledCount">0</span>
+            </div>
+            <div class="metric-card metric-contradicts" id="cardMetricContradicts">
+                <div class="metric-label-row">
+                    <span class="dot dot-contradicts"></span>
+                    <span class="metric-label">Contradictions</span>
+                </div>
+                <span class="metric-value text-contradicts" id="statContradictsCount">0</span>
             </div>
         </section>
 
@@ -102,19 +104,32 @@
             <div class="dropzone" id="dropzone">
                 <input type="file" id="fileInput" accept=".pdf" class="file-input-hidden">
                 <div class="dropzone-content">
-                    <div class="upload-icon-anim">📥</div>
-                    <h3>Drop PDF Here or <span class="browse-link">Browse Local Files</span></h3>
-                    <p class="dropzone-sub">Extracts page-level text, parses tables, resolves entities, and discovers cross-document links</p>
-                    <div class="upload-options">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="limitPagesCheck">
-                            <span>Limit to first 8 pages only (for quick demo; uncheck to process full PDF)</span>
-                        </label>
+                    <div class="upload-icon-wrap">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                    </div>
+                    <div class="dropzone-text-group">
+                        <h3>Click to upload or drag & drop PDF</h3>
+                        <p class="dropzone-sub">Extracts structured facts with exact PDF grounding quotes and resolves cross-document claims</p>
                     </div>
                 </div>
             </div>
 
-            <!-- Progress Card (Dynamic during processing) -->
+            <!-- Ingestion Options: Page Limit -->
+            <div class="page-limit-toolbar">
+                <label class="checkbox-label" for="limitPagesCheck">
+                    <input type="checkbox" id="limitPagesCheck" checked>
+                    <span>Process first</span>
+                </label>
+                <input type="number" id="pageLimitInput" min="1" max="200" value="15" class="page-limit-input">
+                <span class="upload-options-hint">pages by default (uncheck to process all pages)</span>
+            </div>
+
+
+            <!-- Progress Card -->
             <div class="processing-card hidden" id="processingCard">
                 <div class="processing-header">
                     <div class="spinner"></div>
@@ -128,40 +143,39 @@
                 </div>
                 <div class="pipeline-steps">
                     <span class="step-badge active" id="stepParse">1. PDF Parsing</span>
-                    <span class="step-badge" id="stepExtract">2. LLM Fact Extraction</span>
-                    <span class="step-badge" id="stepMatch">3. Hybrid Candidate Matching</span>
+                    <span class="step-badge" id="stepExtract">2. Fact Extraction</span>
+                    <span class="step-badge" id="stepMatch">3. Candidate Matching</span>
                     <span class="step-badge" id="stepJudge">4. Relation Judging</span>
                 </div>
             </div>
 
-            <!-- Run Telemetry Banner (Dynamic after ingestion) -->
+            <!-- Run Telemetry Banner -->
             <div class="telemetry-banner hidden" id="runTelemetryBanner">
                 <div class="telemetry-banner-header">
                     <div class="telemetry-banner-title">
-                        <span class="telemetry-icon">⚡</span>
-                        <h4>Pipeline Efficiency Telemetry for <span id="telemetryDocName">Document</span></h4>
-                        <span class="badge badge-accent" id="telemetryEfficiencyBadge">7x API Savings</span>
+                        <h4>Run Summary: <span id="telemetryDocName">Document</span></h4>
+                        <span class="badge" id="telemetryEfficiencyBadge">Completed</span>
                     </div>
                     <button class="btn-close-sm" id="closeTelemetryBannerBtn" title="Dismiss">✕</button>
                 </div>
                 <div class="telemetry-chips-grid">
                     <div class="telemetry-chip">
                         <span class="telemetry-chip-label">LLM API Calls</span>
-                        <span class="telemetry-chip-val highlight" id="telemetryApiCalls">0 calls</span>
-                        <span class="telemetry-chip-sub" id="telemetryApiCallsSub">vs naive baseline</span>
+                        <span class="telemetry-chip-val" id="telemetryApiCalls">0 calls</span>
+                        <span class="telemetry-chip-sub" id="telemetryApiCallsSub">processed</span>
                     </div>
                     <div class="telemetry-chip">
-                        <span class="telemetry-chip-label">Deterministic Local Facts</span>
-                        <span class="telemetry-chip-val success" id="telemetryLocalFacts">0 facts</span>
-                        <span class="telemetry-chip-sub">0 API calls (PyMuPDF parser)</span>
+                        <span class="telemetry-chip-label">Deterministic Facts</span>
+                        <span class="telemetry-chip-val" id="telemetryLocalFacts">0 facts</span>
+                        <span class="telemetry-chip-sub">table extractor</span>
                     </div>
                     <div class="telemetry-chip">
-                        <span class="telemetry-chip-label">Pages Filtered (No LLM)</span>
+                        <span class="telemetry-chip-label">Pages Filtered</span>
                         <span class="telemetry-chip-val" id="telemetryPagesFiltered">0 pages</span>
-                        <span class="telemetry-chip-sub" id="telemetryPagesFilteredSub">TOC / boilerplate / cover</span>
+                        <span class="telemetry-chip-sub" id="telemetryPagesFilteredSub">boilerplate / covers</span>
                     </div>
                     <div class="telemetry-chip">
-                        <span class="telemetry-chip-label">Run Cost & Time</span>
+                        <span class="telemetry-chip-label">Elapsed Time</span>
                         <span class="telemetry-chip-val" id="telemetryCost">$0.00</span>
                         <span class="telemetry-chip-sub" id="telemetryDuration">in 0.0s</span>
                     </div>
@@ -173,39 +187,28 @@
         <main class="workspace-card">
             <nav class="tabs-nav" role="tablist">
                 <button class="tab-btn active" data-tab="relationships" id="tabBtnRelationships">
-                    <span class="tab-icon">🌐</span>
-                    <span class="tab-title">Relationships Graph</span>
+                    <span class="tab-title">Relationships</span>
                     <span class="tab-count-badge" id="tabRelCount">0</span>
                 </button>
                 <button class="tab-btn" data-tab="facts" id="tabBtnFacts">
-                    <span class="tab-icon">📋</span>
-                    <span class="tab-title">Grounded Facts</span>
+                    <span class="tab-title">Facts</span>
                     <span class="tab-count-badge" id="tabFactsCount">0</span>
                 </button>
                 <button class="tab-btn" data-tab="documents" id="tabBtnDocuments">
-                    <span class="tab-icon">📁</span>
                     <span class="tab-title">Documents</span>
                     <span class="tab-count-badge" id="tabDocsCount">0</span>
                 </button>
                 <button class="tab-btn" data-tab="canonicals" id="tabBtnCanonicals">
-                    <span class="tab-icon">🧩</span>
-                    <span class="tab-title">Entity Resolution</span>
+                    <span class="tab-title">Entities & Metrics</span>
                 </button>
                 <button class="tab-btn" data-tab="compare" id="tabBtnCompare">
-                    <span class="tab-icon">🔬</span>
-                    <span class="tab-title">Compare Sandbox</span>
-                </button>
-                <button class="tab-btn" data-tab="cases" id="tabBtnCases">
-                    <span class="tab-icon">🎯</span>
-                    <span class="tab-title">Required Cases & Failure Analysis</span>
+                    <span class="tab-title">Compare</span>
                 </button>
                 <button class="tab-btn" data-tab="efficiency" id="tabBtnEfficiency">
-                    <span class="tab-icon">⚡</span>
-                    <span class="tab-title">Pipeline Efficiency & Telemetry</span>
+                    <span class="tab-title">Telemetry</span>
                 </button>
                 <button class="tab-btn" data-tab="export" id="tabBtnExport">
-                    <span class="tab-icon">💾</span>
-                    <span class="tab-title">Export Knowledge</span>
+                    <span class="tab-title">Export</span>
                 </button>
             </nav>
 
@@ -214,9 +217,9 @@
                 <div class="toolbar">
                     <div class="filter-group">
                         <button class="filter-pill active" data-filter="all">All (<span id="countRelAll">0</span>)</button>
-                        <button class="filter-pill pill-corroborates" data-filter="corroborates">🤝 Corroborates (<span id="countRelCorr">0</span>)</button>
-                        <button class="filter-pill pill-contradicts" data-filter="contradicts">⚔️ Contradicts (<span id="countRelCont">0</span>)</button>
-                        <button class="filter-pill pill-reconciled" data-filter="reconciled">⚖️ Reconciled (<span id="countRelRec">0</span>)</button>
+                        <button class="filter-pill pill-corroborates" data-filter="corroborates">Corroborates (<span id="countRelCorr">0</span>)</button>
+                        <button class="filter-pill pill-reconciled" data-filter="reconciled">Reconciled (<span id="countRelRec">0</span>)</button>
+                        <button class="filter-pill pill-contradicts" data-filter="contradicts">Contradicts (<span id="countRelCont">0</span>)</button>
                     </div>
                     <div class="toolbar-actions">
                         <label class="toggle-control">
@@ -224,15 +227,14 @@
                             <span class="toggle-slider"></span>
                             <span class="toggle-label">Cross-Document Only</span>
                         </label>
-                        <button class="btn btn-secondary btn-sm" id="refreshRelationshipsBtn">🔄 Refresh</button>
+                        <button class="btn btn-secondary btn-sm" id="refreshRelationshipsBtn">Refresh</button>
                     </div>
                 </div>
 
                 <div class="relationships-feed" id="relationshipsFeed">
                     <div class="empty-state">
-                        <div class="empty-icon">🌱</div>
                         <h4>No Relationships Discovered Yet</h4>
-                        <p>Upload two or more PDFs (or click a sample dataset button above) to extract facts and watch Concord discover cross-document relationships.</p>
+                        <p>Upload documents above to discover cross-document relationships.</p>
                     </div>
                 </div>
             </section>
@@ -241,7 +243,6 @@
             <section class="tab-pane" id="paneFacts">
                 <div class="toolbar facts-toolbar">
                     <div class="search-input-wrap">
-                        <span class="search-icon">🔎</span>
                         <input type="text" id="factsSearchInput" class="form-input search-input" placeholder="Search by entity, attribute, value, or quote...">
                     </div>
                     <div class="filter-select-wrap">
@@ -249,7 +250,7 @@
                             <option value="">All Documents</option>
                         </select>
                     </div>
-                    <button class="btn btn-secondary btn-sm" id="refreshFactsBtn">🔄 Refresh</button>
+                    <button class="btn btn-secondary btn-sm" id="refreshFactsBtn">Refresh</button>
                 </div>
 
                 <div class="table-responsive">
@@ -262,7 +263,7 @@
                                 <th>Scope</th>
                                 <th>Source Doc</th>
                                 <th>Page</th>
-                                <th>Evidence Quote (Grounding)</th>
+                                <th>Evidence Quote</th>
                                 <th>Action</th>
                             </tr>
                         </thead>
@@ -279,11 +280,13 @@
             <section class="tab-pane" id="paneDocuments">
                 <div class="toolbar">
                     <span class="text-muted">Managed Ingested Documents</span>
-                    <button class="btn btn-secondary btn-sm" id="refreshDocsBtn">🔄 Refresh</button>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <button class="btn btn-secondary btn-sm" id="refreshDocsBtn">Refresh</button>
+                        <button class="btn btn-secondary btn-sm text-contradicts" id="clearAllDataBtn" title="Wipe all documents, facts, and relationships">Clear All Data</button>
+                    </div>
                 </div>
                 <div class="documents-grid" id="documentsGrid">
                     <div class="empty-state">
-                        <div class="empty-icon">📁</div>
                         <h4>No Documents Ingested</h4>
                         <p>Upload a PDF above to register documents into the knowledge layer.</p>
                     </div>
@@ -293,14 +296,14 @@
             <!-- TAB 4: Entity Resolution & Normalization -->
             <section class="tab-pane" id="paneCanonicals">
                 <div class="info-callout">
-                    <h4>Why the Normalization Registry Matters</h4>
-                    <p>Financial reports describe identical entities with slight variations (e.g., <em>"Delhivery Ltd"</em> vs <em>"Delhivery Limited"</em> vs <em>"delhivery_inc"</em>). Concord uses a dynamic fuzzy Levenshtein registry to map varied mentions to unified canonical keys, ensuring deterministic structural matching across documents processed days apart.</p>
+                    <h4>Entity & Metric Normalization</h4>
+                    <p>Financial reports describe identical entities and attributes with naming variations (e.g. <em>Delhivery Ltd</em> vs <em>Delhivery Limited</em>). Concord resolves these to canonical keys to power cross-document matching.</p>
                 </div>
 
                 <div class="canonicals-grid">
                     <div class="canonical-box">
                         <div class="box-header">
-                            <h5>Canonical Subjects (Entities)</h5>
+                            <h5>Canonical Entities</h5>
                             <span class="badge" id="canonicalSubjectsCount">0</span>
                         </div>
                         <div class="chips-container" id="canonicalSubjectsList">
@@ -310,7 +313,7 @@
 
                     <div class="canonical-box">
                         <div class="box-header">
-                            <h5>Canonical Attributes (Metrics)</h5>
+                            <h5>Canonical Metrics</h5>
                             <span class="badge" id="canonicalAttributesCount">0</span>
                         </div>
                         <div class="chips-container" id="canonicalAttributesList">
@@ -324,43 +327,43 @@
             <section class="tab-pane" id="paneCompare">
                 <div class="compare-sandbox">
                     <div class="info-callout">
-                        <h4>On-Demand Relation Judge Sandbox</h4>
-                        <p>Select any two facts from your knowledge layer to run an on-demand reconciliation judgment with the LLM.</p>
+                        <h4>Pairwise Claim Comparison</h4>
+                        <p>Select any two facts from your knowledge layer to evaluate their semantic relationship on demand.</p>
                     </div>
 
                     <div class="compare-pickers-grid">
                         <div class="picker-column">
-                            <label for="compareFact1Select">Select Fact 1:</label>
+                            <label for="compareFact1Select">Fact 1</label>
                             <select id="compareFact1Select" class="form-select select-fact">
                                 <option value="">-- Choose Fact 1 --</option>
                             </select>
                             <div class="fact-preview-card" id="previewFact1">
-                                <p class="text-muted">Select a fact above to preview its structured data and evidence quote.</p>
+                                <p class="text-muted">Select a fact above to preview structured data and evidence.</p>
                             </div>
                         </div>
 
                         <div class="compare-vs-badge">VS</div>
 
                         <div class="picker-column">
-                            <label for="compareFact2Select">Select Fact 2:</label>
+                            <label for="compareFact2Select">Fact 2</label>
                             <select id="compareFact2Select" class="form-select select-fact">
                                 <option value="">-- Choose Fact 2 --</option>
                             </select>
                             <div class="fact-preview-card" id="previewFact2">
-                                <p class="text-muted">Select a fact above to preview its structured data and evidence quote.</p>
+                                <p class="text-muted">Select a fact above to preview structured data and evidence.</p>
                             </div>
                         </div>
                     </div>
 
                     <div class="compare-action-row">
                         <button type="button" class="btn btn-primary" id="runCompareBtn">
-                            <span>⚖️ Run Relation Judge</span>
+                            <span>Compare Claims</span>
                         </button>
                     </div>
 
                     <div class="compare-result-card hidden" id="compareResultCard">
                         <div class="result-header">
-                            <h4>Comparison Result</h4>
+                            <h4>Comparison Verdict</h4>
                             <span class="rel-badge" id="compareResultBadge"></span>
                         </div>
                         <div class="result-body" id="compareResultBody"></div>
@@ -368,251 +371,37 @@
                 </div>
             </section>
 
-            <!-- TAB: Required Cases & Failure Analysis -->
-            <section class="tab-pane" id="paneCases">
-                <div class="cases-overview-banner">
-                    <div class="banner-badge">ASSIGNMENT BENCHMARK</div>
-                    <h3>Core Evaluation Cases & Honest Failure Analysis</h3>
-                    <p>Demonstrating the four mandatory scenarios from the Superjoin hiring assignment specification, including cross-document agreement, direct conflict, nuance reconciliation, and honest real-world failure analysis.</p>
-                </div>
-
-                <div class="cases-grid">
-                    <!-- Case 1: Corroboration -->
-                    <div class="case-card case-corroboration">
-                        <div class="case-card-header">
-                            <span class="case-num">Case 1</span>
-                            <span class="rel-badge badge-corroborates">🤝 Corroboration</span>
-                        </div>
-                        <div class="case-card-body">
-                            <h4>Cross-Document Agreement on Historical Metrics</h4>
-                            <p class="case-desc">Identical factual claims verified across independent financial publications with identical scope and values.</p>
-                            
-                            <div class="case-fact-pair">
-                                <div class="case-fact-box">
-                                    <span class="case-doc-label">📄 Delhivery 2022 Prospectus (p. 5)</span>
-                                    <div class="case-metric">Net Worth as of Dec 31, 2021</div>
-                                    <div class="case-val">₹59,798.47 Million</div>
-                                    <blockquote class="case-quote">"59,798.47"</blockquote>
-                                </div>
-                                <div class="case-vs-badge">AGREES WITH</div>
-                                <div class="case-fact-box">
-                                    <span class="case-doc-label">📄 Delhivery FY24 Annual Report (p. 182)</span>
-                                    <div class="case-metric">Historical Net Worth (Dec 31, 2021)</div>
-                                    <div class="case-val">₹59,798.47 Million</div>
-                                    <blockquote class="case-quote">"Net worth at Dec 31, 2021 stood at 59,798.47 INR Million"</blockquote>
-                                </div>
-                            </div>
-
-                            <div class="case-reasoning-box">
-                                <strong>💡 LLM Judge Classification:</strong>
-                                <code>corroborates</code> (Reconciling factor: <code>none</code>)
-                                <p class="reasoning-text">"Both documents report the exact same figure (₹59,798.47 Million) for Delhivery Limited's Net Worth as of December 31, 2021 under identical consolidated accounting scopes. Confirmed factual corroboration across regulatory filings."</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Case 2: Genuine Contradiction -->
-                    <div class="case-card case-contradiction">
-                        <div class="case-card-header">
-                            <span class="case-num">Case 2</span>
-                            <span class="rel-badge badge-contradicts">⚔️ Genuine Contradiction</span>
-                        </div>
-                        <div class="case-card-body">
-                            <h4>Direct Metric Conflict with Matching Scope</h4>
-                            <p class="case-desc">Two authoritative sources report irreconcilable numerical figures for the identical entity, attribute, and temporal period without qualifying scope differences.</p>
-                            
-                            <div class="case-fact-pair">
-                                <div class="case-fact-box">
-                                    <span class="case-doc-label">📄 Q4 Earnings Presentation (Audited)</span>
-                                    <div class="case-metric">Full Year FY24 Consolidated Revenue</div>
-                                    <div class="case-val text-red">₹8,141.65 Crore</div>
-                                    <blockquote class="case-quote">"Revenue from operations for FY24 reached ₹8,141.65 Cr"</blockquote>
-                                </div>
-                                <div class="case-vs-badge">CONFLICTS WITH</div>
-                                <div class="case-fact-box">
-                                    <span class="case-doc-label">📄 Third-Party Analyst Briefing Memo</span>
-                                    <div class="case-metric">Full Year FY24 Consolidated Revenue</div>
-                                    <div class="case-val text-red">₹7,850.00 Crore</div>
-                                    <blockquote class="case-quote">"Delhivery FY24 full-year revenue reported at ₹7,850 Cr"</blockquote>
-                                </div>
-                            </div>
-
-                            <div class="case-reasoning-box">
-                                <strong>💡 LLM Judge Classification:</strong>
-                                <code>contradicts</code> (Reconciling factor: <code>none</code>)
-                                <p class="reasoning-text">"Both claims evaluate the exact same entity ('Delhivery Limited'), attribute ('revenue_operations'), and temporal scope ('FY2024') under consolidated terms. The figures diverge by ₹291.65 Crore with no reconciling entity, temporal, or unit difference. Classified as a true conflict."</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Case 3: Reconciled Apparent Contradiction -->
-                    <div class="case-card case-reconciled">
-                        <div class="case-card-header">
-                            <span class="case-num">Case 3</span>
-                            <span class="rel-badge badge-reconciled">⚖️ Reconciled Contradiction</span>
-                        </div>
-                        <div class="case-card-body">
-                            <h4>Apparent Discrepancy Resolved by Scope Nuance</h4>
-                            <p class="case-desc">Numbers that look contradictory at a glance but are logically reconciled by identifying explicit reconciling factors (temporal scope, definition, or unit).</p>
-                            
-                            <div class="case-fact-pair">
-                                <div class="case-fact-box">
-                                    <span class="case-doc-label">📄 Prospectus Excerpt (p. 5)</span>
-                                    <div class="case-metric">Net Worth (as of 2021-12-31)</div>
-                                    <div class="case-val text-purple">₹59,798.47 Million</div>
-                                    <blockquote class="case-quote">"59,798.47"</blockquote>
-                                </div>
-                                <div class="case-vs-badge">RECONCILED BY TEMPORAL SCOPE</div>
-                                <div class="case-fact-box">
-                                    <span class="case-doc-label">📄 Prospectus Excerpt (p. 5)</span>
-                                    <div class="case-metric">Net Worth (as of 2020-12-31)</div>
-                                    <div class="case-val text-purple">₹29,148.37 Million</div>
-                                    <blockquote class="case-quote">"29,148.37"</blockquote>
-                                </div>
-                            </div>
-
-                            <div class="case-reasoning-box">
-                                <strong>💡 LLM Judge Classification:</strong>
-                                <code>reconciled</code> (Reconciling factor: <span class="badge-factor">temporal_scope</span>)
-                                <p class="reasoning-text">"Fact 1 states Delhivery's net worth as 59,798.47 INR Million as of December 31, 2021, whereas Fact 2 reports 29,148.37 INR Million as of December 31, 2020. The 2x difference is completely reconciled by the 1-year temporal shift (reflecting capital raised leading into the IPO), not an error."</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Case 4: Real Failure Analysis -->
-                    <div class="case-card case-failure">
-                        <div class="case-card-header">
-                            <span class="case-num">Case 4</span>
-                            <span class="rel-badge badge-failure">⚠️ Real Failure Analysis</span>
-                        </div>
-                        <div class="case-card-body">
-                            <h4>Honest Breakdown: Table Footnote Detachment & Currency Scaling</h4>
-                            <p class="case-desc">A deep dive into where the automated pipeline produced an imperfect result, why it failed, and how the architecture addresses it.</p>
-                            
-                            <div class="failure-breakdown-grid">
-                                <div class="failure-item">
-                                    <span class="failure-subhead">1. The Input Scenario</span>
-                                    <p>Delhivery 2022 Prospectus, Page 5 contains financial summary tables where <code>Adjusted EBITDA</code> is printed with superscript footnote <code>(1)</code>: <em>"Adjusted EBITDA: (2,345.67) INR Million *(1)*"</em>.</p>
-                                </div>
-
-                                <div class="failure-item">
-                                    <span class="failure-subhead">2. What Went Wrong (The Failure)</span>
-                                    <p>The PDF text extractor (PyMuPDF) extracts stream text line-by-line. The footnote explanation <em>"(1) Excludes share-based payment expenses and one-time IPO expenses"</em> was positioned 40 lines below at the bottom of the page. The LLM parsed the metric as unconditioned <code>EBITDA</code>, omitting the essential footnote exclusions.</p>
-                                </div>
-
-                                <div class="failure-item">
-                                    <span class="failure-subhead">3. Consequence on Relation Judging</span>
-                                    <p>When matched against the Annual Report's <code>Reported EBITDA</code> (which included share-based payments), the judge classified the pair as a <code>contradiction</code> instead of reconciling it under <code>definition_difference</code> with explicit footnote adjustments.</p>
-                                </div>
-
-                                <div class="failure-item">
-                                    <span class="failure-subhead">4. Root Cause & Architectural Remedy</span>
-                                    <p><strong>Root Cause:</strong> Flattening 2D PDF layout coordinates into 1D linear text strings strips topological proximity between table cells and marginal footnotes.<br>
-                                    <strong>Remedy:</strong> Implemented candidate matching hint tagging (<code>different_scope</code>) and fuzzy registry normalization. Production upgrade: Bounding-box coordinate extraction (PDF table structure trees) to attach cell footnotes before LLM prompt assembly.</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- TAB: Pipeline Efficiency & Telemetry -->
+            <!-- TAB 6: Pipeline Telemetry -->
             <section class="tab-pane" id="paneEfficiency">
                 <div class="toolbar efficiency-toolbar">
                     <div>
-                        <h4 class="efficiency-title">⚡ Hybrid Pipeline Efficiency & Cost Telemetry</h4>
-                        <p class="efficiency-subtitle">Real metrics proving how Concord avoids brute-force LLM calls through heuristic filtering, local deterministic table extraction, and 6-page batching.</p>
+                        <h4 class="efficiency-title">Pipeline Telemetry</h4>
+                        <p class="efficiency-subtitle">Execution telemetry across local table extraction, pre-filtering, and LLM verification.</p>
                     </div>
-                    <button class="btn btn-secondary btn-sm" id="refreshTelemetryBtn">🔄 Refresh Metrics</button>
+                    <button class="btn btn-secondary btn-sm" id="refreshTelemetryBtn">Refresh Metrics</button>
                 </div>
 
-                <!-- Efficiency KPI Cards -->
                 <div class="metrics-strip efficiency-metrics-strip">
-                    <div class="metric-card metric-accent">
-                        <div class="metric-icon">🚀</div>
-                        <div class="metric-body">
-                            <span class="metric-label">API Calls Saved vs Naive</span>
-                            <span class="metric-value" id="statEffCallsSaved">0 (0%)</span>
-                        </div>
+                    <div class="metric-card">
+                        <span class="metric-label">API Calls Saved</span>
+                        <span class="metric-value" id="statEffCallsSaved">0 (0%)</span>
                     </div>
-                    <div class="metric-card metric-corroborates">
-                        <div class="metric-icon">📊</div>
-                        <div class="metric-body">
-                            <span class="metric-label">Zero-API Local Table Facts</span>
-                            <span class="metric-value" id="statEffLocalFacts">0</span>
-                        </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Local Table Facts</span>
+                        <span class="metric-value" id="statEffLocalFacts">0</span>
                     </div>
-                    <div class="metric-card metric-reconciled">
-                        <div class="metric-icon">📑</div>
-                        <div class="metric-body">
-                            <span class="metric-label">Junk Pages Filtered</span>
-                            <span class="metric-value" id="statEffPagesSkipped">0 (0%)</span>
-                        </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Pages Filtered</span>
+                        <span class="metric-value" id="statEffPagesSkipped">0 (0%)</span>
                     </div>
-                    <div class="metric-card metric-contradicts">
-                        <div class="metric-icon">💰</div>
-                        <div class="metric-body">
-                            <span class="metric-label">Cumulative Cost Saved</span>
-                            <span class="metric-value" id="statEffCostSaved">$0.00</span>
-                        </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Estimated Cost Saved</span>
+                        <span class="metric-value" id="statEffCostSaved">$0.00</span>
                     </div>
                 </div>
 
-                <!-- Architectural Contrast Section -->
-                <div class="architecture-contrast-card">
-                    <div class="contrast-header">
-                        <h4>🏛️ Architectural Differentiation: Naive LLM Wrapper vs Concord</h4>
-                        <span class="badge badge-accent">Production-Grade Engineering</span>
-                    </div>
-                    <div class="table-responsive">
-                        <table class="data-table contrast-table">
-                            <thead>
-                                <tr>
-                                    <th>Pipeline Stage</th>
-                                    <th>Naive / Basic Candidate Approach</th>
-                                    <th>Concord Fact Knowledge Layer</th>
-                                    <th>Efficiency & Accuracy Impact</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <td><strong>1. Page Ingestion</strong></td>
-                                    <td>Sends 100% of pages to LLM indiscriminately</td>
-                                    <td><strong>Heuristic Page Pre-Filter</strong> skips TOC, cover pages, and legal boilerplate without LLM</td>
-                                    <td><span class="text-success">15–25% reduction in API calls</span></td>
-                                </tr>
-                                <tr>
-                                    <td><strong>2. Tabular Data</strong></td>
-                                    <td>Flattens 2D tables into linear text; loses column alignment</td>
-                                    <td><strong>Deterministic PyMuPDF Table Extractor</strong> parses balance sheets & P&L with 0 API calls</td>
-                                    <td><span class="text-success">Zero LLM hallucination, 100% precision</span></td>
-                                </tr>
-                                <tr>
-                                    <td><strong>3. Fact Extraction</strong></td>
-                                    <td>1 API call per page (27 calls for a 27-page PDF)</td>
-                                    <td><strong>Multi-Page Batching</strong> (6 pages/prompt) leveraging 1M context window with single-page fallback</td>
-                                    <td><span class="text-success">5–8x faster, 7x lower API cost</span></td>
-                                </tr>
-                                <tr>
-                                    <td><strong>4. Candidate Matching</strong></td>
-                                    <td>Brute-force O(N²) pairwise LLM comparisons</td>
-                                    <td><strong>2-Lane Hybrid Matcher</strong>: Lane 1 (Structural canonicals) + Lane 2 (SBERT embeddings)</td>
-                                    <td><span class="text-success">Filters out 98% of non-candidate pairs</span></td>
-                                </tr>
-                                <tr>
-                                    <td><strong>5. Relation Judging</strong></td>
-                                    <td>Binary, hallucinated "contradiction" flag</td>
-                                    <td><strong>Confidence-Weighted Scoring</strong> with 4 normalized reconciling factor taxonomies</td>
-                                    <td><span class="text-success">Distinguishes true conflict from timing/scope</span></td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- Recent Ingestion Runs Table -->
                 <div class="telemetry-runs-card mt-4">
-                    <h4>📋 Ingestion Runs & Telemetry Log</h4>
+                    <h4>Recent Ingestion Runs</h4>
                     <div class="table-responsive">
                         <table class="data-table" id="telemetryRunsTable">
                             <thead>
@@ -630,7 +419,7 @@
                             </thead>
                             <tbody id="telemetryRunsBody">
                                 <tr>
-                                    <td colspan="9" class="text-center text-muted">No document runs recorded yet. Upload a PDF or click a sample dataset above to see live metrics.</td>
+                                    <td colspan="9" class="text-center text-muted">No document runs recorded yet.</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -638,15 +427,15 @@
                 </div>
             </section>
 
-            <!-- TAB 6: Export & Backup -->
+            <!-- TAB 7: Export -->
             <section class="tab-pane" id="paneExport">
                 <div class="export-container">
                     <div class="export-header-row">
                         <div>
-                            <h4>Knowledge Layer Data Export</h4>
-                            <p class="text-muted">Export complete relational state including documents, grounded facts, claim fingerprints, and judged relationships.</p>
+                            <h4>Knowledge Layer Export</h4>
+                            <p class="text-muted">Export documents, facts, claim fingerprints, and verified relationships in JSON format.</p>
                         </div>
-                        <button class="btn btn-primary" id="downloadExportJsonBtn">📥 Download JSON Bundle</button>
+                        <button class="btn btn-primary" id="downloadExportJsonBtn">Download JSON</button>
                     </div>
                     <pre class="json-preview" id="jsonExportPreview">Loading export bundle...</pre>
                 </div>
@@ -666,12 +455,12 @@
             </div>
             <div class="modal-body">
                 <div class="detail-section">
-                    <h5 class="section-label">Grounded Evidence Quote (Source Truth)</h5>
+                    <h5 class="section-label">Evidence Quote (Verbatim Source)</h5>
                     <blockquote class="verbatim-quote" id="modalFactQuote">Quote preview</blockquote>
                     <div class="citation-meta">
-                        <span class="citation-chip" id="modalFactDoc">📄 Document</span>
-                        <span class="citation-chip" id="modalFactPage">📍 Page</span>
-                        <span class="citation-chip" id="modalFactConfidence">🎯 Confidence</span>
+                        <span class="citation-chip" id="modalFactDoc">Document</span>
+                        <span class="citation-chip" id="modalFactPage">Page</span>
+                        <span class="citation-chip" id="modalFactConfidence">Confidence</span>
                     </div>
                 </div>
 
@@ -715,6 +504,6 @@
     <!-- Toast Notifications Container -->
     <div class="toast-container" id="toastContainer"></div>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=2.8"></script>
 </body>
 </html>

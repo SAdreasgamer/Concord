@@ -2,22 +2,19 @@
 SQLite database layer for Concord.
 
 Uses aiosqlite for async operations. Schema is created on startup.
-All IDs are UUIDs generated in Python — no auto-increment, no DB-specific features.
+All IDs are UUIDs generated in Python.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 import aiosqlite
-import numpy as np
 
 from backend.config import DB_PATH
 
-# --- Schema ---
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -44,7 +41,6 @@ CREATE TABLE IF NOT EXISTS facts (
     page                  INTEGER NOT NULL,
     evidence_quote        TEXT NOT NULL,
     confidence            REAL NOT NULL DEFAULT 0.8,
-    embedding             BLOB,
     created_at            TEXT NOT NULL
 );
 
@@ -76,23 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_relationships_fact2
     ON relationships(fact_id_2);
 CREATE INDEX IF NOT EXISTS idx_relationships_type
     ON relationships(relation_type);
-
-CREATE TABLE IF NOT EXISTS normalization_registry (
-    id              TEXT PRIMARY KEY,
-    key_type        TEXT NOT NULL,
-    raw_value       TEXT NOT NULL,
-    canonical_value TEXT NOT NULL,
-    created_at      TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_norm_key_type
-    ON normalization_registry(key_type);
-CREATE INDEX IF NOT EXISTS idx_norm_canonical
-    ON normalization_registry(canonical_value);
 """
-
-
-# --- Database Manager ---
 
 
 class Database:
@@ -103,18 +83,12 @@ class Database:
         self._db: Optional[aiosqlite.Connection] = None
 
     async def connect(self) -> None:
-        """Open connection and ensure schema exists."""
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA_SQL)
-        try:
-            await self._db.execute("ALTER TABLE relationships ADD COLUMN agreement_strength REAL DEFAULT 1.0")
-        except Exception:
-            pass
         await self._db.commit()
 
     async def close(self) -> None:
-        """Close the database connection."""
         if self._db:
             await self._db.close()
             self._db = None
@@ -127,12 +101,9 @@ class Database:
 
     # --- Documents ---
 
-    async def insert_document(
-        self, doc_id: str, doc_name: str, page_count: int
-    ) -> None:
+    async def insert_document(self, doc_id: str, doc_name: str, page_count: int) -> None:
         await self.db.execute(
-            "INSERT INTO documents (doc_id, doc_name, page_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO documents (doc_id, doc_name, page_count, created_at) VALUES (?, ?, ?, ?)",
             (doc_id, doc_name, page_count, _now_iso()),
         )
         await self.db.commit()
@@ -143,206 +114,133 @@ class Database:
             "  (SELECT COUNT(*) FROM facts f WHERE f.source_doc_id = d.doc_id) AS fact_count "
             "FROM documents d ORDER BY d.created_at DESC"
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in await cursor.fetchall()]
 
     async def get_document(self, doc_id: str) -> Optional[dict]:
-        cursor = await self.db.execute(
-            "SELECT * FROM documents WHERE doc_id = ?", (doc_id,)
-        )
+        cursor = await self.db.execute("SELECT * FROM documents WHERE doc_id = ?", (doc_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
 
     async def delete_document(self, doc_id: str) -> bool:
-        """Delete a document and cascade delete its facts and relationships."""
         doc = await self.get_document(doc_id)
         if not doc:
             return False
-
-        # 1. Delete relationships referencing facts from this document
         await self.db.execute(
             "DELETE FROM relationships WHERE fact_id_1 IN (SELECT id FROM facts WHERE source_doc_id = ?) "
             "   OR fact_id_2 IN (SELECT id FROM facts WHERE source_doc_id = ?)",
             (doc_id, doc_id),
         )
-
-        # 2. Delete facts from this document
         await self.db.execute("DELETE FROM facts WHERE source_doc_id = ?", (doc_id,))
-
-        # 3. Delete document record
         await self.db.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
         await self.db.commit()
         return True
 
+    async def clear_all_data(self) -> None:
+        await self.db.execute("DELETE FROM relationships")
+        await self.db.execute("DELETE FROM facts")
+        await self.db.execute("DELETE FROM documents")
+        await self.db.commit()
+
     # --- Facts ---
 
-    async def insert_fact(self, fact: dict, embedding: Optional[bytes] = None) -> str:
+    async def insert_fact(self, fact: dict) -> str:
         fact_id = fact.get("id") or str(uuid.uuid4())
         await self.db.execute(
             "INSERT INTO facts "
             "(id, subject, subject_normalized, attribute, attribute_normalized, "
             " value, unit, temporal_scope, conditions, claim_fingerprint, "
             " extraction_group_id, source_doc, source_doc_id, page, "
-            " evidence_quote, confidence, embedding, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " evidence_quote, confidence, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 fact_id,
-                fact["subject"],
-                fact["subject_normalized"],
-                fact["attribute"],
-                fact["attribute_normalized"],
-                fact["value"],
-                fact.get("unit"),
-                fact.get("temporal_scope"),
-                fact.get("conditions"),
-                fact["claim_fingerprint"],
-                fact.get("extraction_group_id"),
-                fact["source_doc"],
-                fact["source_doc_id"],
-                fact["page"],
-                fact["evidence_quote"],
-                fact.get("confidence", 0.8),
-                embedding,
-                _now_iso(),
+                fact["subject"], fact["subject_normalized"],
+                fact["attribute"], fact["attribute_normalized"],
+                fact["value"], fact.get("unit"),
+                fact.get("temporal_scope"), fact.get("conditions"),
+                fact["claim_fingerprint"], fact.get("extraction_group_id"),
+                fact["source_doc"], fact["source_doc_id"],
+                fact["page"], fact["evidence_quote"],
+                fact.get("confidence", 0.8), _now_iso(),
             ),
         )
         await self.db.commit()
         return fact_id
 
-    @staticmethod
-    def _clean_fact_row(row) -> Optional[dict]:
-        if not row:
-            return None
-        d = dict(row)
-        d.pop("embedding", None)
-        return d
-
-    async def get_facts(
-        self, source_doc_id: Optional[str] = None, limit: int = 500
-    ) -> list[dict]:
+    async def get_facts(self, source_doc_id: Optional[str] = None, limit: int = 500) -> list[dict]:
         if source_doc_id:
             cursor = await self.db.execute(
-                "SELECT * FROM facts WHERE source_doc_id = ? "
-                "ORDER BY page, created_at LIMIT ?",
+                "SELECT * FROM facts WHERE source_doc_id = ? ORDER BY page, created_at LIMIT ?",
                 (source_doc_id, limit),
             )
         else:
             cursor = await self.db.execute(
                 "SELECT * FROM facts ORDER BY created_at DESC LIMIT ?", (limit,)
             )
-        rows = await cursor.fetchall()
-        return [self._clean_fact_row(row) for row in rows]
+        return [dict(row) for row in await cursor.fetchall()]
 
     async def get_fact(self, fact_id: str) -> Optional[dict]:
-        cursor = await self.db.execute(
-            "SELECT * FROM facts WHERE id = ?", (fact_id,)
-        )
+        cursor = await self.db.execute("SELECT * FROM facts WHERE id = ?", (fact_id,))
         row = await cursor.fetchone()
-        return self._clean_fact_row(row)
-
-    async def get_facts_by_fingerprint_prefix(
-        self, subject_normalized: str, attribute_normalized: str
-    ) -> list[dict]:
-        """Find facts sharing the same (subject, attribute) normalized keys."""
-        cursor = await self.db.execute(
-            "SELECT * FROM facts "
-            "WHERE subject_normalized = ? AND attribute_normalized = ?",
-            (subject_normalized, attribute_normalized),
-        )
-        rows = await cursor.fetchall()
-        return [self._clean_fact_row(row) for row in rows]
-
-    async def get_all_fact_embeddings(
-        self, exclude_doc_id: Optional[str] = None
-    ) -> list[tuple[str, np.ndarray]]:
-        """Get all fact IDs and their embeddings for similarity search."""
-        if exclude_doc_id:
-            cursor = await self.db.execute(
-                "SELECT id, embedding FROM facts "
-                "WHERE embedding IS NOT NULL AND source_doc_id != ?",
-                (exclude_doc_id,),
-            )
-        else:
-            cursor = await self.db.execute(
-                "SELECT id, embedding FROM facts WHERE embedding IS NOT NULL"
-            )
-        rows = await cursor.fetchall()
-        results = []
-        for row in rows:
-            emb = np.frombuffer(row["embedding"], dtype=np.float32)
-            results.append((row["id"], emb))
-        return results
-
-    async def update_fact_embedding(self, fact_id: str, embedding: bytes) -> None:
-        """Update the embedding BLOB for an existing fact."""
-        await self.db.execute(
-            "UPDATE facts SET embedding = ? WHERE id = ?",
-            (embedding, fact_id),
-        )
-        await self.db.commit()
+        return dict(row) if row else None
 
     # --- Relationships ---
 
-    async def insert_relationship(self, rel: dict) -> str:
-        rel_id = rel.get("id") or str(uuid.uuid4())
+    async def insert_relationship(self, rel: Any) -> str:
+        data = rel.model_dump() if hasattr(rel, "model_dump") else rel
+        rel_id = data.get("id") or str(uuid.uuid4())
+        r_type = data["relation_type"].value if hasattr(data["relation_type"], "value") else str(data["relation_type"])
+
+        r_type = r_type.lower().replace("relationtype.", "")
+        r_factor = data.get("reconciling_factor", "none")
+        r_factor = r_factor.value if hasattr(r_factor, "value") else str(r_factor)
+        r_factor = r_factor.lower().replace("reconcilingfactor.", "")
+        m_source = data.get("match_source", "structural")
+        m_source = m_source.value if hasattr(m_source, "value") else str(m_source)
+
         await self.db.execute(
             "INSERT INTO relationships "
             "(id, fact_id_1, fact_id_2, relation_type, reconciling_factor, "
             " explanation, match_source, is_intra_document, agreement_strength, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                rel_id,
-                rel["fact_id_1"],
-                rel["fact_id_2"],
-                rel["relation_type"],
-                rel.get("reconciling_factor", "none"),
-                rel["explanation"],
-                rel["match_source"],
-                1 if rel.get("is_intra_document") else 0,
-                float(rel.get("agreement_strength", 1.0)),
-                _now_iso(),
+                rel_id, data["fact_id_1"], data["fact_id_2"],
+                r_type, r_factor,
+                data["explanation"], m_source,
+                1 if data.get("is_intra_document") else 0,
+                float(data.get("agreement_strength", 1.0)), _now_iso(),
             ),
         )
+
         await self.db.commit()
         return rel_id
 
-    async def get_relationships(
-        self, relation_type: Optional[str] = None, limit: int = 500
-    ) -> list[dict]:
+
+    async def get_relationships(self, relation_type: Optional[str] = None, limit: int = 500) -> list[dict]:
         if relation_type:
             cursor = await self.db.execute(
-                "SELECT * FROM relationships WHERE relation_type = ? "
-                "ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM relationships WHERE relation_type = ? ORDER BY created_at DESC LIMIT ?",
                 (relation_type, limit),
             )
         else:
             cursor = await self.db.execute(
-                "SELECT * FROM relationships ORDER BY created_at DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM relationships ORDER BY created_at DESC LIMIT ?", (limit,)
             )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in await cursor.fetchall()]
 
     async def get_relationships_for_fact(self, fact_id: str) -> list[dict]:
         cursor = await self.db.execute(
-            "SELECT * FROM relationships "
-            "WHERE fact_id_1 = ? OR fact_id_2 = ? "
-            "ORDER BY created_at DESC",
+            "SELECT * FROM relationships WHERE fact_id_1 = ? OR fact_id_2 = ? ORDER BY created_at DESC",
             (fact_id, fact_id),
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in await cursor.fetchall()]
 
     async def get_relationship(self, rel_id: str) -> Optional[dict]:
-        """Fetch a single relationship by ID."""
-        cursor = await self.db.execute(
-            "SELECT * FROM relationships WHERE id = ?", (rel_id,)
-        )
+        cursor = await self.db.execute("SELECT * FROM relationships WHERE id = ?", (rel_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
 
     async def get_relationships_for_document(self, doc_id: str) -> list[dict]:
-        """Get all relationships where at least one fact belongs to this document."""
         cursor = await self.db.execute(
             "SELECT r.* FROM relationships r "
             "WHERE r.fact_id_1 IN (SELECT id FROM facts WHERE source_doc_id = ?) "
@@ -350,62 +248,28 @@ class Database:
             "ORDER BY r.created_at DESC",
             (doc_id, doc_id),
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in await cursor.fetchall()]
 
     async def relationship_exists(self, fact_id_1: str, fact_id_2: str) -> bool:
-        """Check if a relationship already exists between two facts (in either direction)."""
         cursor = await self.db.execute(
             "SELECT 1 FROM relationships "
-            "WHERE (fact_id_1 = ? AND fact_id_2 = ?) "
-            "   OR (fact_id_1 = ? AND fact_id_2 = ?) "
-            "LIMIT 1",
+            "WHERE (fact_id_1 = ? AND fact_id_2 = ?) OR (fact_id_1 = ? AND fact_id_2 = ?) LIMIT 1",
             (fact_id_1, fact_id_2, fact_id_2, fact_id_1),
         )
-        row = await cursor.fetchone()
-        return row is not None
-
-    # --- Normalization Registry ---
-
-    async def get_canonical_values(self, key_type: str) -> list[dict]:
-        cursor = await self.db.execute(
-            "SELECT DISTINCT canonical_value FROM normalization_registry "
-            "WHERE key_type = ?",
-            (key_type,),
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-    async def insert_normalization_entry(
-        self, key_type: str, raw_value: str, canonical_value: str
-    ) -> str:
-        entry_id = str(uuid.uuid4())
-        await self.db.execute(
-            "INSERT INTO normalization_registry "
-            "(id, key_type, raw_value, canonical_value, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (entry_id, key_type, raw_value, canonical_value, _now_iso()),
-        )
-        await self.db.commit()
-        return entry_id
+        return (await cursor.fetchone()) is not None
 
     # --- Stats ---
 
     async def get_stats(self) -> dict:
-        """Get overall statistics."""
         docs = await self.db.execute("SELECT COUNT(*) as c FROM documents")
         facts = await self.db.execute("SELECT COUNT(*) as c FROM facts")
         rels = await self.db.execute("SELECT COUNT(*) as c FROM relationships")
-        docs_count = (await docs.fetchone())["c"]
-        facts_count = (await facts.fetchone())["c"]
-        rels_count = (await rels.fetchone())["c"]
         return {
-            "documents": docs_count,
-            "facts": facts_count,
-            "relationships": rels_count,
+            "documents": (await docs.fetchone())["c"],
+            "facts": (await facts.fetchone())["c"],
+            "relationships": (await rels.fetchone())["c"],
         }
 
 
 def _now_iso() -> str:
-    """Current UTC timestamp in ISO format."""
     return datetime.now(timezone.utc).isoformat()

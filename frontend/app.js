@@ -6,9 +6,13 @@
 
 document.addEventListener("DOMContentLoaded", () => {
     // --- State ---
+    const savedModel = localStorage.getItem("concord_model");
+    const initialModel = (savedModel && savedModel.startsWith("groq/")) ? savedModel : "groq/qwen/qwen3.8-27b";
+    localStorage.setItem("concord_model", initialModel);
+
     const state = {
         apiKey: sessionStorage.getItem("concord_api_key") || "",
-        model: localStorage.getItem("concord_model") || "groq/openai/gpt-oss-120b",
+        model: initialModel,
         documents: [],
         facts: [],
         relationships: [],
@@ -48,6 +52,7 @@ document.addEventListener("DOMContentLoaded", () => {
         dropzone: document.getElementById("dropzone"),
         fileInput: document.getElementById("fileInput"),
         limitPagesCheck: document.getElementById("limitPagesCheck"),
+        pageLimitInput: document.getElementById("pageLimitInput"),
         sampleButtons: document.querySelectorAll(".sample-btn"),
         processingCard: document.getElementById("processingCard"),
         processingTitle: document.getElementById("processingTitle"),
@@ -73,6 +78,7 @@ document.addEventListener("DOMContentLoaded", () => {
         // Documents View
         documentsGrid: document.getElementById("documentsGrid"),
         refreshDocsBtn: document.getElementById("refreshDocsBtn"),
+        clearAllDataBtn: document.getElementById("clearAllDataBtn"),
 
         // Canonicals View
         canonicalSubjectsList: document.getElementById("canonicalSubjectsList"),
@@ -184,6 +190,14 @@ document.addEventListener("DOMContentLoaded", () => {
         elements.modelSelect.addEventListener("change", (e) => {
             state.model = e.target.value;
             localStorage.setItem("concord_model", state.model);
+            if (state.model.startsWith("ollama/")) {
+                elements.apiKeyInput.placeholder = "Local Ollama active (No API key needed)";
+                elements.apiKeyInput.disabled = true;
+                validateApiKey();
+            } else {
+                elements.apiKeyInput.placeholder = "Paste Groq (gsk_...) or Gemini key...";
+                elements.apiKeyInput.disabled = false;
+            }
             showToast(`Switched model to ${elements.modelSelect.options[elements.modelSelect.selectedIndex].text}`, "info");
         });
 
@@ -195,7 +209,17 @@ document.addEventListener("DOMContentLoaded", () => {
             });
         });
 
-        // File Dropzone
+        // File Dropzone Click & Drag/Drop
+        elements.dropzone.addEventListener("click", (e) => {
+            if (e.target !== elements.fileInput) {
+                elements.fileInput.click();
+            }
+        });
+
+        elements.fileInput.addEventListener("click", (e) => {
+            e.stopPropagation();
+        });
+
         elements.dropzone.addEventListener("dragover", (e) => {
             e.preventDefault();
             elements.dropzone.classList.add("dragover");
@@ -216,7 +240,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
         elements.fileInput.addEventListener("change", (e) => {
             if (e.target.files.length > 0) {
-                handleFileUpload(e.target.files[0]);
+                const file = e.target.files[0];
+                handleFileUpload(file);
+                e.target.value = "";
             }
         });
 
@@ -227,6 +253,16 @@ document.addEventListener("DOMContentLoaded", () => {
                 handleLoadSample(sampleKey);
             });
         });
+
+        // Dynamic page limit toggle
+        if (elements.limitPagesCheck && elements.pageLimitInput) {
+            elements.limitPagesCheck.addEventListener("change", () => {
+                elements.pageLimitInput.disabled = !elements.limitPagesCheck.checked;
+                if (elements.limitPagesCheck.checked) {
+                    elements.pageLimitInput.focus();
+                }
+            });
+        }
 
         // Relationship Filters
         elements.filterPills.forEach((pill) => {
@@ -264,11 +300,30 @@ document.addEventListener("DOMContentLoaded", () => {
             showToast("Facts refreshed", "info");
         });
 
-        // Documents Refresh
+        // Documents Refresh & Clear
         elements.refreshDocsBtn.addEventListener("click", () => {
             fetchDocuments();
             showToast("Documents refreshed", "info");
         });
+
+        if (elements.clearAllDataBtn) {
+            elements.clearAllDataBtn.addEventListener("click", async () => {
+                if (!confirm("Are you sure you want to clear all documents, facts, and relationships?")) {
+                    return;
+                }
+                try {
+                    const resp = await fetch("/api/reset", { method: "POST" });
+                    if (resp.ok) {
+                        showToast("All data cleared. System ready for fresh testing.", "info");
+                        await refreshAllData();
+                    } else {
+                        showToast("Failed to clear data", "error");
+                    }
+                } catch (e) {
+                    showToast(`Error: ${e.message}`, "error");
+                }
+            });
+        }
 
         // Compare Sandbox
         elements.compareFact1Select.addEventListener("change", () => updateComparePreview(1));
@@ -322,20 +377,21 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // --- API Key Validation ---
     async function validateApiKey() {
-        if (!state.apiKey) {
-            showToast("Please paste an API key first", "error");
+        const isOllama = state.model && state.model.startsWith("ollama/");
+        if (!state.apiKey && !isOllama) {
+            showToast("Please paste an API key first (or select local Ollama)", "error");
             elements.apiKeyInput.focus();
             return;
         }
 
-        elements.keyStatusBadge.textContent = "Testing...";
+        elements.keyStatusBadge.textContent = isOllama ? "Checking..." : "Testing...";
         elements.keyStatusBadge.className = "key-status-indicator text-muted";
 
         try {
             const resp = await fetch(`/api/validate-key?model=${encodeURIComponent(state.model)}`, {
                 method: "POST",
                 headers: {
-                    "X-API-Key": state.apiKey,
+                    "X-API-Key": state.apiKey || "",
                 },
             });
             const data = await resp.json();
@@ -346,11 +402,11 @@ document.addEventListener("DOMContentLoaded", () => {
                     elements.modelSelect.value = state.model;
                     localStorage.setItem("concord_model", state.model);
                 }
-                elements.keyStatusBadge.textContent = "✓ Valid";
+                elements.keyStatusBadge.textContent = isOllama ? "✓ Local Ready" : "✓ Valid";
                 elements.keyStatusBadge.className = "key-status-indicator text-success";
-                showToast(`API Key validated successfully (${data.model || state.model})!`, "success");
+                showToast(data.message || "Model connected successfully!", "success");
             } else {
-                elements.keyStatusBadge.textContent = "✕ Invalid";
+                elements.keyStatusBadge.textContent = "✕ Error";
                 elements.keyStatusBadge.className = "key-status-indicator text-danger";
                 showToast(`Validation failed: ${data.message || "Invalid Key"}`, "error");
             }
@@ -455,11 +511,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const formData = new FormData();
         formData.append("file", file);
 
-        const maxPages = elements.limitPagesCheck.checked ? 8 : 100;
-        const queryParams = new URLSearchParams({
-            model: state.model,
-            max_pages: maxPages,
-        });
+        const isLimited = elements.limitPagesCheck && elements.limitPagesCheck.checked;
+        const maxPages = isLimited ? (parseInt(elements.pageLimitInput?.value, 10) || 15) : null;
+        const queryParams = new URLSearchParams({ model: state.model });
+        if (maxPages) {
+            queryParams.set("max_pages", maxPages);
+        }
 
         startProgressUI(`Ingesting ${file.name}`);
 
@@ -502,11 +559,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // --- Ingestion: Load Sample Dataset ---
     async function handleLoadSample(sampleKey) {
-        const maxPages = elements.limitPagesCheck.checked ? 8 : 100;
-        const queryParams = new URLSearchParams({
-            model: state.model,
-            max_pages: maxPages,
-        });
+        const isLimited = elements.limitPagesCheck && elements.limitPagesCheck.checked;
+        const maxPages = isLimited ? (parseInt(elements.pageLimitInput?.value, 10) || 15) : null;
+        const queryParams = new URLSearchParams({ model: state.model });
+        if (maxPages) {
+            queryParams.set("max_pages", maxPages);
+        }
 
         startProgressUI(`Loading sample dataset: ${sampleKey}`);
 
@@ -540,11 +598,19 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // --- Progress Stepper UI ---
+    let progressTimer = null;
+    let progressStartTime = 0;
+
     function startProgressUI(title) {
+        if (progressTimer) {
+            clearInterval(progressTimer);
+            progressTimer = null;
+        }
         elements.processingCard.classList.remove("hidden");
         elements.processingTitle.textContent = title;
-        elements.processingDetail.textContent = "Reading PDF pages and extracting text layer...";
-        elements.progressBarFill.style.width = "25%";
+        elements.processingDetail.textContent = "Parsing PDF pages and extracting structured tables...";
+        elements.progressBarFill.style.width = "20%";
+        progressStartTime = Date.now();
 
         document.getElementById("stepParse").className = "step-badge active";
         document.getElementById("stepExtract").className = "step-badge";
@@ -552,34 +618,42 @@ document.addEventListener("DOMContentLoaded", () => {
         document.getElementById("stepJudge").className = "step-badge";
 
         setTimeout(() => {
-            elements.progressBarFill.style.width = "50%";
+            elements.progressBarFill.style.width = "40%";
             document.getElementById("stepParse").className = "step-badge done";
             document.getElementById("stepExtract").className = "step-badge active";
-            elements.processingDetail.textContent = "Extracting atomic grounded facts with LLM...";
         }, 1200);
 
-        setTimeout(() => {
-            elements.progressBarFill.style.width = "75%";
-            document.getElementById("stepExtract").className = "step-badge done";
-            document.getElementById("stepMatch").className = "step-badge active";
-            elements.processingDetail.textContent = "Executing Lane 1 structural & Lane 2 embedding matching...";
-        }, 3000);
-
-        setTimeout(() => {
-            elements.progressBarFill.style.width = "90%";
-            document.getElementById("stepMatch").className = "step-badge done";
-            document.getElementById("stepJudge").className = "step-badge active";
-            elements.processingDetail.textContent = "Judging relationships and contextual reconciliation...";
-        }, 5000);
+        progressTimer = setInterval(() => {
+            const elapsed = Math.round((Date.now() - progressStartTime) / 1000);
+            if (elapsed <= 1) {
+                elements.processingDetail.textContent = "Parsing PDF pages and extracting structured tables...";
+            } else if (elapsed <= 25) {
+                elements.processingDetail.textContent = `Extracting atomic grounded facts with LLM (${elapsed}s elapsed)...`;
+                const pct = Math.min(75, 40 + Math.round((elapsed / 25) * 35));
+                elements.progressBarFill.style.width = `${pct}%`;
+            } else {
+                elements.processingDetail.textContent = `Matching candidates and evaluating relationships (${elapsed}s elapsed)...`;
+                document.getElementById("stepExtract").className = "step-badge done";
+                document.getElementById("stepMatch").className = "step-badge active";
+                elements.progressBarFill.style.width = "85%";
+            }
+        }, 1000);
     }
 
     function finishProgressUI() {
-        elements.progressBarFill.style.width = "100%";
+        if (progressTimer) {
+            clearInterval(progressTimer);
+            progressTimer = null;
+        }
+        document.getElementById("stepParse").className = "step-badge done";
+        document.getElementById("stepExtract").className = "step-badge done";
+        document.getElementById("stepMatch").className = "step-badge done";
         document.getElementById("stepJudge").className = "step-badge done";
+        elements.progressBarFill.style.width = "100%";
         elements.processingDetail.textContent = "Processing complete!";
         setTimeout(() => {
             elements.processingCard.classList.add("hidden");
-        }, 1500);
+        }, 1200);
     }
 
     // --- Render: Relationships Feed ---
@@ -642,16 +716,13 @@ document.addEventListener("DOMContentLoaded", () => {
                 };
 
                 let badgeClass = "badge-corroborates";
-                let badgeIcon = "🤝";
                 let badgeText = "Corroborates";
 
                 if (rel.relation_type === "contradicts") {
                     badgeClass = "badge-contradicts";
-                    badgeIcon = "⚔️";
                     badgeText = "Contradicts";
                 } else if (rel.relation_type === "reconciled") {
                     badgeClass = "badge-reconciled";
-                    badgeIcon = "⚖️";
                     badgeText = "Reconciled";
                 }
 
@@ -669,18 +740,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 const strength = rel.agreement_strength !== undefined && rel.agreement_strength !== null ? rel.agreement_strength : 1.0;
                 const strengthPct = Math.round(strength * 100);
-                const strengthBadge = strength >= 0.8
-                    ? `<span class="rel-strength-chip strength-high" title="Extraction Agreement Strength: ${strengthPct}%">🎯 ${strengthPct}% Confidence</span>`
-                    : `<span class="rel-strength-chip strength-low" title="Low Evidence Confidence: ${strengthPct}%">⚠️ ${strengthPct}% Confidence</span>`;
+                const strengthBadge = `<span class="rel-strength-chip" title="Agreement Strength: ${strengthPct}%">${strengthPct}% Match</span>`;
 
                 return `
                 <div class="relation-card card-${rel.relation_type}">
                     <div class="relation-card-header">
                         <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
-                            <span class="rel-badge ${badgeClass}">${badgeIcon} ${badgeText}</span>
+                            <span class="rel-badge ${badgeClass}">${badgeText}</span>
                             ${strengthBadge}
                             ${factorBadge}
-                            ${rel.is_intra_document ? '<span class="badge" style="background:rgba(245,158,11,0.15); color:#fcd34d;">Intra-Document</span>' : ''}
+                            ${rel.is_intra_document ? '<span class="badge badge-intra">Intra-Document</span>' : ''}
                         </div>
                         <span class="match-source-chip">${matchSourceText}</span>
                     </div>
@@ -688,7 +757,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     <div class="comparison-grid">
                         <div class="fact-box">
                             <div class="fact-box-header">
-                                <span class="doc-tag" title="${escapeHtml(f1.source_doc)}">📄 ${escapeHtml(f1.source_doc)}</span>
+                                <span class="doc-tag" title="${escapeHtml(f1.source_doc)}">${escapeHtml(f1.source_doc)}</span>
                                 <span class="page-tag">p. ${f1.page}</span>
                             </div>
                             <div class="fact-main-statement">
@@ -700,16 +769,14 @@ document.addEventListener("DOMContentLoaded", () => {
                                 <span>Period: <strong>${escapeHtml(f1.temporal_scope || 'unspecified')}</strong></span>
                                 ${f1.conditions ? `<span>Scope: <em>${escapeHtml(f1.conditions)}</em></span>` : ''}
                             </div>
-                            <div class="evidence-quote-snippet" title="Verbatim source quote">
+                            <div class="quote-snippet" title="Verbatim source quote">
                                 "${escapeHtml(f1.evidence_quote)}"
                             </div>
                         </div>
 
-                        <div class="bridge-arrow">⇄</div>
-
                         <div class="fact-box">
                             <div class="fact-box-header">
-                                <span class="doc-tag" title="${escapeHtml(f2.source_doc)}">📄 ${escapeHtml(f2.source_doc)}</span>
+                                <span class="doc-tag" title="${escapeHtml(f2.source_doc)}">${escapeHtml(f2.source_doc)}</span>
                                 <span class="page-tag">p. ${f2.page}</span>
                             </div>
                             <div class="fact-main-statement">
@@ -721,17 +788,14 @@ document.addEventListener("DOMContentLoaded", () => {
                                 <span>Period: <strong>${escapeHtml(f2.temporal_scope || 'unspecified')}</strong></span>
                                 ${f2.conditions ? `<span>Scope: <em>${escapeHtml(f2.conditions)}</em></span>` : ''}
                             </div>
-                            <div class="evidence-quote-snippet" title="Verbatim source quote">
+                            <div class="quote-snippet" title="Verbatim source quote">
                                 "${escapeHtml(f2.evidence_quote)}"
                             </div>
                         </div>
                     </div>
 
-                    <div class="relation-reasoning">
-                        <span class="reasoning-icon">💡</span>
-                        <div class="reasoning-text">
-                            <strong>System Reasoning:</strong> ${escapeHtml(rel.explanation)}
-                        </div>
+                    <div class="relation-explanation">
+                        <strong>Reasoning:</strong> ${escapeHtml(rel.explanation)}
                     </div>
                 </div>
                 `;
@@ -904,21 +968,18 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     async function handleProcessExistingDoc(docId) {
-        if (!state.apiKey) {
-            showToast("Please enter an API key to process this document", "error");
-            elements.apiKeyInput.focus();
-            return;
-        }
-
-        startProgressUI(`Processing document ${docId}`);
+        startProgressUI(`Processing document...`);
 
         try {
+            const headers = {};
+            if (state.apiKey) {
+                headers["X-API-Key"] = state.apiKey;
+            }
             const resp = await fetch(`/api/documents/${docId}/process?model=${encodeURIComponent(state.model)}`, {
                 method: "POST",
-                headers: {
-                    "X-API-Key": state.apiKey,
-                },
+                headers: headers,
             });
+
             const data = await resp.json();
 
             finishProgressUI();
@@ -1003,24 +1064,20 @@ document.addEventListener("DOMContentLoaded", () => {
             showToast("Please choose two different facts", "error");
             return;
         }
-        if (!state.apiKey) {
-            showToast("Please enter an API key for the relation judge", "error");
-            elements.apiKeyInput.focus();
-            return;
-        }
-
         elements.runCompareBtn.disabled = true;
         elements.runCompareBtn.innerHTML = `<span>⏳ Judging Relationship...</span>`;
 
         try {
+            const headers = { "Content-Type": "application/json" };
+            if (state.apiKey) {
+                headers["X-API-Key"] = state.apiKey;
+            }
             const resp = await fetch(`/api/relationships/compare?model=${encodeURIComponent(state.model)}`, {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-API-Key": state.apiKey,
-                },
+                headers: headers,
                 body: JSON.stringify({ fact_id_1: id1, fact_id_2: id2 }),
             });
+
 
             const data = await resp.json();
             elements.runCompareBtn.disabled = false;
@@ -1094,9 +1151,9 @@ document.addEventListener("DOMContentLoaded", () => {
         elements.modalFactTitle.textContent = `${fact.subject} — ${fact.attribute}`;
         elements.modalFactScope.textContent = fact.temporal_scope || "Scope Unspecified";
         elements.modalFactQuote.textContent = fact.evidence_quote;
-        elements.modalFactDoc.textContent = `📄 ${fact.source_doc}`;
-        elements.modalFactPage.textContent = `📍 Page ${fact.page}`;
-        elements.modalFactConfidence.textContent = `🎯 Confidence: ${(fact.confidence * 100).toFixed(0)}%`;
+        elements.modalFactDoc.textContent = fact.source_doc;
+        elements.modalFactPage.textContent = `Page ${fact.page}`;
+        elements.modalFactConfidence.textContent = `${(fact.confidence * 100).toFixed(0)}% Confidence`;
 
         elements.modalFactSubject.textContent = fact.subject;
         elements.modalFactSubjectNorm.textContent = fact.subject_normalized;

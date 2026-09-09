@@ -1,7 +1,7 @@
 """
 Application configuration.
 
-All settings are read from environment variables or provided at runtime.
+All settings are read from environment variables or .env file.
 Nothing is hardcoded — defaults are only for non-sensitive, non-data values.
 """
 
@@ -12,12 +12,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Paths (all relative to project root, never hardcoded absolute paths) ---
+# Prevent LiteLLM from blocking on GitHub SSL timeouts for remote cost maps
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+try:
+    import litellm
+    litellm.telemetry = False
+    litellm.drop_params = True
+except Exception:
+    pass
+
+# --- Paths ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = PROJECT_ROOT / "uploads"
 DB_PATH = PROJECT_ROOT / "concord.db"
 
-# Ensure upload directory exists at startup
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 # --- Server ---
@@ -30,19 +38,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
-DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "groq/openai/gpt-oss-120b")
-
-# --- Embeddings ---
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
-EMBEDDING_DIMENSION = 384  # Matches all-MiniLM-L6-v2 output dimension
-
-# --- Normalization Registry ---
-NORMALIZATION_SIMILARITY_THRESHOLD = float(
-    os.getenv("NORMALIZATION_SIMILARITY_THRESHOLD", "85")
-)
-
-# --- Candidate Matching ---
-EMBEDDING_SIMILARITY_THRESHOLD = float(
-    os.getenv("EMBEDDING_SIMILARITY_THRESHOLD", "0.75")
-)
-EMBEDDING_TOP_K = int(os.getenv("EMBEDDING_TOP_K", "5"))
+DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "groq/qwen/qwen3.8-27b")
+OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+DEFAULT_PAGE_LIMIT = int(os.getenv("DEFAULT_PAGE_LIMIT", "15"))

@@ -1,310 +1,165 @@
 """
-Hybrid candidate matching module.
+Candidate matching module.
 
-Lane 1 (Primary): Structural key matching via (subject_normalized, attribute_normalized)
-                  and claim_fingerprint. Fast, deterministic, and maps directly
-                  to corroboration, contradiction, and reconciliation cases.
-Lane 2 (Fallback): Vector embedding similarity search via sentence-transformers.
-                   Catches synonyms, paraphrases, and implicit relationships that
-                   differ in phrasing.
+Finds pairs of facts across documents that should be compared.
+Two strategies:
+  1. Structural: same subject_normalized + same attribute_normalized
+  2. Fuzzy: same subject_normalized + attributes share meaningful word overlap
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
-from backend.config import EMBEDDING_SIMILARITY_THRESHOLD, EMBEDDING_TOP_K
 from backend.database import Database
-from backend.embeddings import EmbeddingService
 from backend.models import CandidatePair, Fact, MatchSource
 
 logger = logging.getLogger(__name__)
 
 
-def make_pair_key(id_a: str, id_b: str) -> tuple[str, str]:
-    """Ensure canonical pair order so (A, B) and (B, A) share the same key."""
+# Words that carry no semantic signal for attribute matching
+_STOP_WORDS = {
+    "of", "in", "the", "and", "to", "for", "a", "an", "on", "as", "by", "at", "per", "from", "with",
+    "average", "total", "net", "gross", "daily", "annual", "monthly", "quarterly",
+    "number", "numbers", "share", "shares", "period", "year", "quarter", "value", "figure", "level", "rate", "ratio",
+}
+
+
+def _attribute_words(attr: str) -> set[str]:
+    """Extract meaningful words from an attribute string."""
+    return set(re.findall(r"[a-z0-9]+", attr.lower())) - _STOP_WORDS
+
+
+def are_attributes_related(attr1: str, attr2: str) -> bool:
+    """Check if two attributes are semantically related via word overlap in a domain-agnostic manner."""
+    w1 = _attribute_words(attr1)
+    w2 = _attribute_words(attr2)
+    if not w1 or not w2:
+        return False
+    overlap = w1 & w2
+    if not overlap:
+        return False
+    # If they share any meaningful content word of 4+ characters (e.g. 'revenue', 'ebitda', 'profit', 'growth')
+    return any(len(w) >= 4 for w in overlap) or len(overlap) >= 2
+
+
+def are_subjects_related(s1: str, s2: str) -> bool:
+    """Check if two subjects refer to the same entity (exact, stem, or meaningful substring)."""
+    if not s1 or not s2:
+        return False
+    if s1 == s2:
+        return True
+    if len(s1) >= 4 and len(s2) >= 4:
+        if s1 in s2 or s2 in s1:
+            return True
+        words1 = set(s1.split("_"))
+        words2 = set(s2.split("_"))
+        overlap = words1 & words2
+        if overlap and any(len(w) >= 4 for w in overlap):
+            return True
+    return False
+
+
+def _pair_key(id_a: str, id_b: str) -> tuple[str, str]:
+
+    """Canonical pair order so (A,B) and (B,A) share the same key."""
     return (id_a, id_b) if id_a < id_b else (id_b, id_a)
 
 
-class CandidateMatcher:
-    """
-    Two-lane hybrid candidate matcher for finding related facts across documents.
-    """
-
-    def __init__(
-        self,
-        db: Database,
-        embedding_service: Optional[EmbeddingService] = None,
-        embedding_threshold: float = EMBEDDING_SIMILARITY_THRESHOLD,
-        top_k: int = EMBEDDING_TOP_K,
-    ):
-        self.db = db
-        self.embedding_service = embedding_service or EmbeddingService()
-        self.embedding_threshold = embedding_threshold
-        self.top_k = top_k
-
-    async def find_candidates(
-        self,
-        new_facts: list[Fact],
-        existing_facts: Optional[list[Fact]] = None,
-        check_existing_relationships: bool = True,
-    ) -> list[CandidatePair]:
-        """
-        Find candidate fact pairs for the relation judge using two-lane matching.
-
-        Args:
-            new_facts: Newly extracted or targeted facts to find matches for.
-            existing_facts: Optional existing facts to compare against. If None,
-                            loads from the database.
-            check_existing_relationships: If True, skips pairs that already have
-                                          a judged relationship in the database.
-
-        Returns:
-            List of CandidatePair models ready for the relation judge.
-        """
-        if not new_facts:
-            return []
-
-        # Map to track unique candidates by canonical (id1, id2) key
-        candidate_map: dict[tuple[str, str], CandidatePair] = {}
-
-        # 1. Load comparison facts
-        if existing_facts is None:
-            all_db_facts = await self.db.get_facts(limit=3000)
-            comparison_facts = [Fact(**f) for f in all_db_facts]
-        else:
-            comparison_facts = existing_facts
-
-        # Index comparison facts by ID for fast lookup
-        fact_by_id: dict[str, Fact] = {f.id: f for f in comparison_facts if f.id}
-        for f in new_facts:
-            if f.id:
-                fact_by_id[f.id] = f
-
-        # --- LANE 1: Structural Key Matching (Deterministic) ---
-        for new_fact in new_facts:
-            if not new_fact.id:
-                continue
-
-            # Find facts with same normalized subject and attribute
-            struct_matches = [
-                f
-                for f in comparison_facts
-                if f.id != new_fact.id
-                and f.subject_normalized == new_fact.subject_normalized
-                and f.attribute_normalized == new_fact.attribute_normalized
-            ]
-
-            for matched_fact in struct_matches:
-                if not matched_fact.id:
-                    continue
-
-                # Nuance Check: Sibling decomposition check
-                # Sibling facts decomposed from the same sentence share extraction_group_id
-                if (
-                    new_fact.extraction_group_id
-                    and matched_fact.extraction_group_id
-                    and new_fact.extraction_group_id == matched_fact.extraction_group_id
-                ):
-                    continue
-
-                pair_key = make_pair_key(new_fact.id, matched_fact.id)
-
-                # Incremental Ingestion: skip if already judged
-                if check_existing_relationships and await self.db.relationship_exists(
-                    new_fact.id, matched_fact.id
-                ):
-                    continue
-
-                # Classify match hint based on claim fingerprint
-                if new_fact.claim_fingerprint == matched_fact.claim_fingerprint:
-                    hint = "exact_scope"  # Likely corroboration or contradiction
-                else:
-                    hint = "different_scope"  # Likely reconciliation
-
-                # Order facts deterministically in pair
-                f1 = fact_by_id[pair_key[0]]
-                f2 = fact_by_id[pair_key[1]]
-
-                candidate_map[pair_key] = CandidatePair(
-                    fact_1=f1,
-                    fact_2=f2,
-                    match_source=MatchSource.STRUCTURAL,
-                    match_hint=hint,
-                    is_intra_document=(f1.source_doc_id == f2.source_doc_id),
-                )
-
-        # --- LANE 2: Vector Embedding Similarity (Semantic Fallback) ---
-        try:
-            # Ensure new facts have embeddings generated and stored
-            new_fact_embeddings: dict[str, any] = {}
-            for new_fact in new_facts:
-                if not new_fact.id:
-                    continue
-                emb = self.embedding_service.embed_fact(new_fact)
-                new_fact_embeddings[new_fact.id] = emb
-                # Persist embedding to DB if connected
-                try:
-                    await self.db.update_fact_embedding(
-                        new_fact.id, self.embedding_service.to_bytes(emb)
-                    )
-                except Exception as e:
-                    logger.debug("Could not update embedding in DB: %s", e)
-
-            # Get all stored embeddings from DB for comparison
-            all_stored_embeddings = await self.db.get_all_fact_embeddings()
-
-            for new_fact in new_facts:
-                if not new_fact.id:
-                    continue
-                query_vec = new_fact_embeddings.get(new_fact.id)
-                if query_vec is None:
-                    continue
-
-                # Filter out self
-                candidates_for_query = [
-                    (fid, vec)
-                    for (fid, vec) in all_stored_embeddings
-                    if fid != new_fact.id
-                ]
-
-                top_matches = self.embedding_service.find_top_k(
-                    query_vec=query_vec,
-                    candidate_embeddings=candidates_for_query,
-                    top_k=self.top_k,
-                    threshold=self.embedding_threshold,
-                )
-
-                for other_id, score in top_matches:
-                    other_fact = fact_by_id.get(other_id)
-                    if not other_fact:
-                        continue
-
-                    # Sibling decomposition check
-                    if (
-                        new_fact.extraction_group_id
-                        and other_fact.extraction_group_id
-                        and new_fact.extraction_group_id == other_fact.extraction_group_id
-                    ):
-                        continue
-
-                    pair_key = make_pair_key(new_fact.id, other_id)
-
-                    # Incremental Ingestion: skip if already judged
-                    if check_existing_relationships and await self.db.relationship_exists(
-                        new_fact.id, other_id
-                    ):
-                        continue
-
-                    f1 = fact_by_id[pair_key[0]]
-                    f2 = fact_by_id[pair_key[1]]
-
-                    if pair_key in candidate_map:
-                        # Already discovered via structural matching -> Upgrade to BOTH
-                        candidate_map[pair_key].match_source = MatchSource.BOTH
-                    else:
-                        # Discovered solely via embedding lane
-                        candidate_map[pair_key] = CandidatePair(
-                            fact_1=f1,
-                            fact_2=f2,
-                            match_source=MatchSource.EMBEDDING,
-                            match_hint=f"semantic_similarity_{score:.2f}",
-                            is_intra_document=(f1.source_doc_id == f2.source_doc_id),
-                        )
-        except Exception as e:
-            logger.warning("Lane 2 embedding matching encountered error: %s", e)
-
-        candidates = list(candidate_map.values())
-        logger.info(
-            "Found %d candidate pairs (%d structural, %d embedding, %d both)",
-            len(candidates),
-            sum(1 for c in candidates if c.match_source == MatchSource.STRUCTURAL),
-            sum(1 for c in candidates if c.match_source == MatchSource.EMBEDDING),
-            sum(1 for c in candidates if c.match_source == MatchSource.BOTH),
-        )
-        return candidates
-
-
-def match_facts_in_memory(
-    facts: list[Fact],
-    embedding_service: Optional[EmbeddingService] = None,
-    embedding_threshold: float = EMBEDDING_SIMILARITY_THRESHOLD,
+async def find_candidates(
+    new_facts: list[Fact],
+    db: Database,
+    cross_document_only: bool = True,
 ) -> list[CandidatePair]:
     """
-    Pure in-memory candidate matching for testing and lightweight pipelines.
+    Find candidate fact pairs for relationship judging.
+
+    Compares new_facts against all existing facts in the database.
+    Returns pairs that share the same subject and have related attributes.
     """
-    if len(facts) < 2:
+    if not new_facts:
         return []
 
+    # Load all existing facts
+    all_db_facts = await db.get_facts(limit=3000)
+    existing_facts = [Fact(**f) for f in all_db_facts]
+
+    # Index by ID
+    fact_by_id: dict[str, Fact] = {f.id: f for f in existing_facts if f.id}
+    for f in new_facts:
+        if f.id:
+            fact_by_id[f.id] = f
+
     candidate_map: dict[tuple[str, str], CandidatePair] = {}
-    fact_by_id = {f.id: f for f in facts if f.id}
 
-    # Lane 1: Structural matching
-    for i in range(len(facts)):
-        for j in range(i + 1, len(facts)):
-            f1 = facts[i]
-            f2 = facts[j]
-            if not f1.id or not f2.id:
+    for new_fact in new_facts:
+        if not new_fact.id:
+            continue
+
+        for existing in existing_facts:
+            if not existing.id or existing.id == new_fact.id:
                 continue
 
-            # Sibling check
-            if (
-                f1.extraction_group_id
-                and f2.extraction_group_id
-                and f1.extraction_group_id == f2.extraction_group_id
-            ):
+            # Skip intra-document pairs
+            if cross_document_only and existing.source_doc_id == new_fact.source_doc_id:
                 continue
 
-            # Structural key match
-            if (
-                f1.subject_normalized == f2.subject_normalized
-                and f1.attribute_normalized == f2.attribute_normalized
-            ):
-                hint = (
-                    "exact_scope"
-                    if f1.claim_fingerprint == f2.claim_fingerprint
-                    else "different_scope"
-                )
-                pair_key = make_pair_key(f1.id, f2.id)
-                candidate_map[pair_key] = CandidatePair(
-                    fact_1=fact_by_id[pair_key[0]],
-                    fact_2=fact_by_id[pair_key[1]],
-                    match_source=MatchSource.STRUCTURAL,
-                    match_hint=hint,
-                    is_intra_document=(f1.source_doc_id == f2.source_doc_id),
-                )
+            # Must be same or closely related entity
+            if not are_subjects_related(existing.subject_normalized, new_fact.subject_normalized):
+                continue
 
-    # Lane 2: Embedding matching
-    if embedding_service:
-        embeddings = embedding_service.embed_facts(facts)
-        for i in range(len(facts)):
-            for j in range(i + 1, len(facts)):
-                f1 = facts[i]
-                f2 = facts[j]
-                if not f1.id or not f2.id:
-                    continue
 
-                if (
-                    f1.extraction_group_id
-                    and f2.extraction_group_id
-                    and f1.extraction_group_id == f2.extraction_group_id
-                ):
-                    continue
+            # Skip sibling facts from same extraction group
+            if (new_fact.extraction_group_id and existing.extraction_group_id
+                    and new_fact.extraction_group_id == existing.extraction_group_id):
+                continue
 
-                pair_key = make_pair_key(f1.id, f2.id)
-                sim = embedding_service.cosine_similarity(embeddings[i], embeddings[j])
+            # Check attribute relationship
+            is_exact = existing.attribute_normalized == new_fact.attribute_normalized
+            is_fuzzy = not is_exact and are_attributes_related(
+                new_fact.attribute_normalized or new_fact.attribute,
+                existing.attribute_normalized or existing.attribute,
+            )
 
-                if sim >= embedding_threshold:
-                    if pair_key in candidate_map:
-                        candidate_map[pair_key].match_source = MatchSource.BOTH
-                    else:
-                        candidate_map[pair_key] = CandidatePair(
-                            fact_1=fact_by_id[pair_key[0]],
-                            fact_2=fact_by_id[pair_key[1]],
-                            match_source=MatchSource.EMBEDDING,
-                            match_hint=f"semantic_similarity_{sim:.2f}",
-                            is_intra_document=(f1.source_doc_id == f2.source_doc_id),
-                        )
+            if not is_exact and not is_fuzzy:
+                continue
 
-    return list(candidate_map.values())
+            pk = _pair_key(new_fact.id, existing.id)
+
+            # Skip already judged
+            if await db.relationship_exists(new_fact.id, existing.id):
+                continue
+
+            if pk in candidate_map:
+                continue
+
+            # Determine match hint
+            if new_fact.claim_fingerprint == existing.claim_fingerprint:
+                hint = "exact_scope"
+            else:
+                hint = "different_scope"
+
+            f1 = fact_by_id[pk[0]]
+            f2 = fact_by_id[pk[1]]
+
+            candidate_map[pk] = CandidatePair(
+                fact_1=f1,
+                fact_2=f2,
+                match_source=MatchSource.STRUCTURAL if is_exact else MatchSource.FUZZY,
+                match_hint=hint,
+                is_intra_document=(f1.source_doc_id == f2.source_doc_id),
+            )
+
+    candidates = list(candidate_map.values())
+    # Prioritize exact structural matches over fuzzy matches, cap to top 4 to ensure instant execution
+    candidates = sorted(candidates, key=lambda c: 0 if c.match_source == MatchSource.STRUCTURAL else 1)[:4]
+    logger.info(
+        "Selected top %d candidate pairs (%d structural, %d fuzzy)",
+        len(candidates),
+        sum(1 for c in candidates if c.match_source == MatchSource.STRUCTURAL),
+        sum(1 for c in candidates if c.match_source == MatchSource.FUZZY),
+    )
+    return candidates
+
