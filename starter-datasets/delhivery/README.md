@@ -1,3 +1,4 @@
+
 # Starter Dataset
 
 This folder contains a curated set of public Delhivery documents for the assignment. The two longer source documents have been reduced to 100 PDF pages while preserving the sections most relevant to fact extraction and cross-document reconciliation.
