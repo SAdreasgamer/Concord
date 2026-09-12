@@ -6,7 +6,6 @@
 [![LLM Cost Reduction](https://img.shields.io/badge/API_Calls-7x_Reduction-blue.svg)](#-empirical-benchmarks)
 [![Tests](https://img.shields.io/badge/Tests-10_Passing_(Offline)-brightgreen.svg)](#-regression-test-suite)
 [![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](#-docker-deployment)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Production-grade **Fact Knowledge Layer** built for the **Superjoin Engineering Assignment**. Concord ingests arbitrary financial and macroeconomic PDFs, extracts grounded atomic facts with **verbatim provenance**, constructs deterministic **claim fingerprints**, and reconciles cross-document relationships using a **hybrid deterministic + LLM classification pipeline** — with **zero domain hardcoding**.
 
@@ -494,9 +493,3 @@ tests/test_pipeline.py::test_api_health_check           PASSED
 8. **Sibling Exclusion.** `extraction_group_id` prevents comparing fragments of the same sentence.
 9. **Cascade Deletion.** Removing a document purges all associated facts and relationships.
 10. **Multi-Provider LLM.** Switch Groq/Gemini/OpenAI/Ollama with one env var.
-
----
-
-## 📄 License
-
-MIT License. Built for the Superjoin Finance Intern Assignment.
